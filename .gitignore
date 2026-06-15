@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+wandb/
+
+AGENTS.md
+CLAUDE.md
+
+# Generated CY outputs are large; keep only curated samples checked into this extraction.
+data/cy/output*/
+!data/cy/output_random_flip/
+!data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl
+!data/cy/output4d/
+!data/cy/output4d/cy4d_random_flip_100_3_random_flip.samples.jsonl
+
+# New training checkpoints are generated artifacts. The curated checkpoint directory is intentionally retained.
+ckpt/*
+!ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/
+!ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/*.pth

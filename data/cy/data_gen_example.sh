@@ -1,0 +1,12 @@
+python generate_dataset.py \
+    --k3-path ../cy_data/k3.txt \
+    --num-polytopes 2000 \
+    --num-triangulations-per-frst 5 \
+    --frsts-per-polytope 10 \
+    --seed 3 \
+    --output-dir output_random_flip \
+    --output-name cy_reflexive_dataset_random_flip_fast_2000_100 \
+    --max_depth 100 \
+    --max_node 2000 \
+    --fast \
+    --random_flip
