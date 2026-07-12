@@ -5,7 +5,7 @@ import json
 import time
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Sequence
+from typing import TYPE_CHECKING, Any, Callable, List, Sequence
 
 import numpy as np
 import torch
@@ -23,7 +23,11 @@ warnings.filterwarnings(
 )
 
 from core.training_types import CYDatasetSplit, FirstEpisodeTracker, PolicyRolloutSummary
-from core.cy_policy_rollout_utils import format_rollout_summary, increment_visitation
+from core.cy_policy_rollout_utils import (
+    format_rollout_summary,
+    increment_visitation,
+    rollout_return_statistics,
+)
 from core.cy_data_utils import mean_vertex_count, split_rows_by_vertex_count
 from core.train_cy import maybe_filter_initial_state_pool, normalize_subcomplex_actor_type
 from core.cy_runtime_utils import resolve_training_device, set_seeds
@@ -40,6 +44,12 @@ from mdp.cy_rollout import (
     get_rollout_memory_stats,
     load_cy_sample_rows,
     maybe_compact_rollout_memory,
+)
+from reward_functions import (
+    SUPPORTED_REWARDS,
+    get_objective,
+    get_reward,
+    infer_goal,
 )
 
 if TYPE_CHECKING:
@@ -69,7 +79,7 @@ def _format_memory_stats(stats: dict[str, int]) -> str:
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate a CY subcomplex policy checkpoint on the full eval split.",
     )
@@ -102,6 +112,14 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Forwarded to cytools Polytope.triangulate(...).",
+    )
+    parser.add_argument(
+        "--reward_function",
+        "--reward",
+        dest="reward_function",
+        choices=SUPPORTED_REWARDS,
+        default=None,
+        help="Optional triangulation objective. Omit to evaluate CY sampling.",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument(
@@ -236,7 +254,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to save the evaluation summary JSON.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def resolve_dataset_split(
@@ -318,6 +336,55 @@ def attach_rollout_length_record(
     return summary
 
 
+def attach_objective_record(
+    summary: PolicyRolloutSummary,
+    *,
+    objective_name: str | None,
+    objective_goal: str | None,
+    initial_values: Sequence[float] | None,
+    final_values: Sequence[float] | None,
+    best_values: Sequence[float] | None,
+) -> PolicyRolloutSummary:
+    summary.objective_name = objective_name
+    summary.objective_goal = objective_goal
+    summary.objective_initial_values = (
+        None if initial_values is None else [float(value) for value in initial_values]
+    )
+    summary.objective_final_values = (
+        None if final_values is None else [float(value) for value in final_values]
+    )
+    summary.objective_best_values = (
+        None if best_values is None else [float(value) for value in best_values]
+    )
+    return summary
+
+
+def _updated_best_objective(goal: str, current_best: float, candidate: float) -> float:
+    if goal == "min":
+        return min(float(current_best), float(candidate))
+    if goal == "max":
+        return max(float(current_best), float(candidate))
+    raise ValueError(f"Unsupported objective goal '{goal}'.")
+
+
+def _objective_improvements(
+    goal: str,
+    initial_values: Sequence[float],
+    best_values: Sequence[float],
+) -> List[float]:
+    if goal == "min":
+        return [
+            float(initial) - float(best)
+            for initial, best in zip(initial_values, best_values)
+        ]
+    if goal == "max":
+        return [
+            float(best) - float(initial)
+            for initial, best in zip(initial_values, best_values)
+        ]
+    raise ValueError(f"Unsupported objective goal '{goal}'.")
+
+
 def collect_policy_rollout_over_initial_states(
     *,
     engine: CYRandomRolloutEngine,
@@ -335,6 +402,9 @@ def collect_policy_rollout_over_initial_states(
     report_every: int,
     label: str,
     vertex_preprocessor: VertexPreprocessor | None = None,
+    objective_function: Callable[[Any], float] | None = None,
+    objective_name: str | None = None,
+    objective_goal: str | None = None,
 ) -> PolicyRolloutSummary:
     full_initial_states = list(initial_states)
     if not full_initial_states:
@@ -345,6 +415,20 @@ def collect_policy_rollout_over_initial_states(
     active_indices = list(range(len(full_initial_states)))
     final_states = list(full_initial_states)
     rollout_lengths = np.zeros(len(full_initial_states), dtype=np.int64)
+    rollout_returns = np.zeros(len(full_initial_states), dtype=np.float64)
+    objective_initial_values = (
+        [float(objective_function(state)) for state in full_initial_states]
+        if objective_function is not None
+        else None
+    )
+    objective_final_values = (
+        None if objective_initial_values is None else list(objective_initial_values)
+    )
+    objective_best_values = (
+        None if objective_initial_values is None else list(objective_initial_values)
+    )
+    if objective_function is not None and objective_goal is None:
+        raise ValueError("objective_goal is required with objective_function.")
 
     total_frt_hits = 0
     total_collapsed_hits = 0
@@ -393,6 +477,16 @@ def collect_policy_rollout_over_initial_states(
             full_dones[global_idx] = bool(step_result.dones[local_idx])
             full_terminal_reasons[global_idx] = step_result.terminal_reasons[local_idx]
 
+            if objective_function is not None:
+                transitioned_state = step_result.transitioned_states[local_idx]
+                objective_value = float(objective_function(transitioned_state))
+                objective_final_values[global_idx] = objective_value
+                objective_best_values[global_idx] = _updated_best_objective(
+                    objective_goal,
+                    objective_best_values[global_idx],
+                    objective_value,
+                )
+
             if step_result.dones[local_idx]:
                 final_states[global_idx] = step_result.transitioned_states[local_idx]
             else:
@@ -407,6 +501,7 @@ def collect_policy_rollout_over_initial_states(
             terminal_reasons=full_terminal_reasons,
             step_index=step_index,
         )
+        rollout_returns += full_rewards
 
         active_states = next_active_states
         active_indices = next_active_indices
@@ -442,7 +537,8 @@ def collect_policy_rollout_over_initial_states(
                 f"active_states={len(active_states)}"
             )
 
-    return attach_rollout_length_record(
+    return_stats = rollout_return_statistics(rollout_returns)
+    summary = attach_rollout_length_record(
         PolicyRolloutSummary(
             final_states=final_states,
             rollout_buffer=None,
@@ -468,8 +564,21 @@ def collect_policy_rollout_over_initial_states(
             policy_value_inference_sec=total_policy_value_inference_sec,
             policy_action_inference_sec=total_policy_action_inference_sec,
             transition_apply_sec=total_transition_apply_sec,
+            return_mean=return_stats["mean"],
+            return_std=return_stats["std"],
+            return_min=return_stats["min"],
+            return_max=return_stats["max"],
+            training_return_mean=return_stats["mean"],
         ),
         rollout_lengths=rollout_lengths.tolist(),
+    )
+    return attach_objective_record(
+        summary,
+        objective_name=objective_name,
+        objective_goal=objective_goal,
+        initial_values=objective_initial_values,
+        final_values=objective_final_values,
+        best_values=objective_best_values,
     )
 
 
@@ -486,6 +595,9 @@ def collect_random_rollout_over_initial_states(
     transition_mp_min_batch: int,
     report_every: int,
     label: str,
+    objective_function: Callable[[Any], float] | None = None,
+    objective_name: str | None = None,
+    objective_goal: str | None = None,
 ) -> PolicyRolloutSummary:
     full_initial_states = list(initial_states)
     if not full_initial_states:
@@ -496,6 +608,20 @@ def collect_random_rollout_over_initial_states(
     active_indices = list(range(len(full_initial_states)))
     final_states = list(full_initial_states)
     rollout_lengths = np.zeros(len(full_initial_states), dtype=np.int64)
+    rollout_returns = np.zeros(len(full_initial_states), dtype=np.float64)
+    objective_initial_values = (
+        [float(objective_function(state)) for state in full_initial_states]
+        if objective_function is not None
+        else None
+    )
+    objective_final_values = (
+        None if objective_initial_values is None else list(objective_initial_values)
+    )
+    objective_best_values = (
+        None if objective_initial_values is None else list(objective_initial_values)
+    )
+    if objective_function is not None and objective_goal is None:
+        raise ValueError("objective_goal is required with objective_function.")
 
     total_frt_hits = 0
     total_collapsed_hits = 0
@@ -538,6 +664,16 @@ def collect_random_rollout_over_initial_states(
             full_dones[global_idx] = bool(step_result.dones[local_idx])
             full_terminal_reasons[global_idx] = step_result.terminal_reasons[local_idx]
 
+            if objective_function is not None:
+                transitioned_state = step_result.transitioned_states[local_idx]
+                objective_value = float(objective_function(transitioned_state))
+                objective_final_values[global_idx] = objective_value
+                objective_best_values[global_idx] = _updated_best_objective(
+                    objective_goal,
+                    objective_best_values[global_idx],
+                    objective_value,
+                )
+
             if step_result.dones[local_idx]:
                 final_states[global_idx] = step_result.transitioned_states[local_idx]
             else:
@@ -552,6 +688,7 @@ def collect_random_rollout_over_initial_states(
             terminal_reasons=full_terminal_reasons,
             step_index=step_index,
         )
+        rollout_returns += full_rewards
 
         active_states = next_active_states
         active_indices = next_active_indices
@@ -581,7 +718,8 @@ def collect_random_rollout_over_initial_states(
                 f"active_states={len(active_states)}"
             )
 
-    return attach_rollout_length_record(
+    return_stats = rollout_return_statistics(rollout_returns)
+    summary = attach_rollout_length_record(
         PolicyRolloutSummary(
             final_states=final_states,
             rollout_buffer=None,
@@ -607,8 +745,21 @@ def collect_random_rollout_over_initial_states(
             policy_value_inference_sec=0.0,
             policy_action_inference_sec=0.0,
             transition_apply_sec=0.0,
+            return_mean=return_stats["mean"],
+            return_std=return_stats["std"],
+            return_min=return_stats["min"],
+            return_max=return_stats["max"],
+            training_return_mean=return_stats["mean"],
         ),
         rollout_lengths=rollout_lengths.tolist(),
+    )
+    return attach_objective_record(
+        summary,
+        objective_name=objective_name,
+        objective_goal=objective_goal,
+        initial_values=objective_initial_values,
+        final_values=objective_final_values,
+        best_values=objective_best_values,
     )
 
 
@@ -634,7 +785,7 @@ def build_summary_payload(
     rollout_length_mean = float(getattr(eval_summary, "rollout_length_mean", 0.0))
     rollout_length_min = int(getattr(eval_summary, "rollout_length_min", 0))
     rollout_length_max = int(getattr(eval_summary, "rollout_length_max", 0))
-    return {
+    payload = {
         "checkpoint_path": checkpoint_path,
         "policy_mode": policy_mode,
         "preprocessing": normalize_preprocessing_mode(preprocessing),
@@ -660,6 +811,10 @@ def build_summary_payload(
             "subcomplex_neighbour": int(shared_cache_sizes["subcomplex_neighbour"]),
         },
         "success_rate": float(eval_summary.success_rate),
+        "return_mean": float(eval_summary.return_mean),
+        "return_std": float(eval_summary.return_std),
+        "return_min": float(eval_summary.return_min),
+        "return_max": float(eval_summary.return_max),
         "discounted_reward": float(eval_summary.discounted_reward),
         "finished_fraction": float(eval_summary.finished_fraction),
         "finished_count": int(eval_summary.finished_count),
@@ -682,10 +837,54 @@ def build_summary_payload(
         "policy_action_inference_sec": float(eval_summary.policy_action_inference_sec),
         "transition_apply_sec": float(eval_summary.transition_apply_sec),
     }
+    if eval_summary.objective_name is not None:
+        initial_values = list(eval_summary.objective_initial_values or ())
+        final_values = list(eval_summary.objective_final_values or ())
+        best_values = list(eval_summary.objective_best_values or ())
+        if not (len(initial_values) == len(final_values) == len(best_values)):
+            raise ValueError("Objective metric arrays must have equal lengths.")
+
+        improvements = _objective_improvements(
+            eval_summary.objective_goal,
+            initial_values,
+            best_values,
+        )
+
+        payload["objective"] = {
+            "name": eval_summary.objective_name,
+            "goal": eval_summary.objective_goal,
+            "initial_values": initial_values,
+            "final_values": final_values,
+            "best_values": best_values,
+            "initial_mean": float(np.mean(initial_values)) if initial_values else 0.0,
+            "final_mean": float(np.mean(final_values)) if final_values else 0.0,
+            "best_mean": float(np.mean(best_values)) if best_values else 0.0,
+            "mean_improvement": float(np.mean(improvements)) if improvements else 0.0,
+            "improved_fraction": (
+                float(np.mean(np.asarray(improvements) > 0.0)) if improvements else 0.0
+            ),
+        }
+    return payload
 
 
 def main(args: argparse.Namespace) -> None:
     set_seeds(args.seed)
+    reward_function = (
+        get_reward(args.reward_function) if args.reward_function is not None else None
+    )
+    objective_function = (
+        get_objective(args.reward_function) if args.reward_function is not None else None
+    )
+    objective_goal = (
+        infer_goal(args.reward_function) if args.reward_function is not None else None
+    )
+    if reward_function is None:
+        print("Using CY sampling reward.")
+    else:
+        print(
+            f"Using triangulation objective: reward={args.reward_function} "
+            f"goal={objective_goal}"
+        )
     resolved_preprocessing = normalize_preprocessing_mode(args.preprocessing)
     vertex_preprocessor = resolve_eval_vertex_preprocessor(
         random_policy=bool(args.random),
@@ -755,6 +954,7 @@ def main(args: argparse.Namespace) -> None:
         include_points_interior_to_facets=args.include_points_interior_to_facets,
         state_cache_mode=args.state_cache_mode,
         max_hot_states=args.max_hot_states,
+        reward_function=reward_function,
     )
     policy = None
     if not args.random:
@@ -839,6 +1039,9 @@ def main(args: argparse.Namespace) -> None:
                 transition_mp_min_batch=int(args.transition_mp_min_batch),
                 report_every=int(args.report_every),
                 label="eval",
+                objective_function=objective_function,
+                objective_name=args.reward_function,
+                objective_goal=objective_goal,
             )
         else:
             policy.eval()
@@ -858,6 +1061,9 @@ def main(args: argparse.Namespace) -> None:
                 report_every=int(args.report_every),
                 label="eval",
                 vertex_preprocessor=vertex_preprocessor,
+                objective_function=objective_function,
+                objective_name=args.reward_function,
+                objective_goal=objective_goal,
             )
         eval_sec = time.perf_counter() - eval_start
 
@@ -875,6 +1081,24 @@ def main(args: argparse.Namespace) -> None:
             f"min={int(getattr(eval_summary, 'rollout_length_min', 0))} "
             f"max={int(getattr(eval_summary, 'rollout_length_max', 0))}"
         )
+        if eval_summary.objective_name is not None:
+            initial_values = eval_summary.objective_initial_values or []
+            final_values = eval_summary.objective_final_values or []
+            best_values = eval_summary.objective_best_values or []
+            improvements = _objective_improvements(
+                eval_summary.objective_goal,
+                initial_values,
+                best_values,
+            )
+            print(
+                "Objective: "
+                f"name={eval_summary.objective_name} "
+                f"goal={eval_summary.objective_goal} "
+                f"initial_mean={float(np.mean(initial_values)):.4f} "
+                f"final_mean={float(np.mean(final_values)):.4f} "
+                f"best_mean={float(np.mean(best_values)):.4f} "
+                f"mean_improvement={float(np.mean(improvements)):.4f}"
+            )
         print(
             "System: "
             f"{_format_memory_stats(get_rollout_memory_stats(eval_engine))} "

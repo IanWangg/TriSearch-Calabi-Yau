@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -473,6 +473,8 @@ def rollout_step_with_policy(
     dead_end_hits = 0
 
     unique_nonterminal_next_keys: dict[str, None] = {}
+    reward_function = getattr(engine, "reward_function", None)
+    objective_mode = reward_function is not None
     for idx, state in enumerate(current_states):
         if not bool(selection.valid_action_mask[idx].item()):
             transitioned_states.append(state)
@@ -487,7 +489,7 @@ def rollout_step_with_policy(
         chosen_actions.append(selected_action)
 
         transition = engine.nodes_by_key[str(state.key)].transitions[selected_action]
-        if transition.next_is_target is True:
+        if not objective_mode and transition.next_is_target is True:
             transitioned_states.append(state)
             rewards[idx] = 1.0
             dones[idx] = True
@@ -495,7 +497,7 @@ def rollout_step_with_policy(
             frt_hits += 1
             continue
 
-        if len(transition.next_simplices) <= 1:
+        if not objective_mode and len(transition.next_simplices) <= 1:
             transitioned_states.append(state)
             rewards[idx] = -1.0
             dones[idx] = True
@@ -506,7 +508,9 @@ def rollout_step_with_policy(
         next_state = engine.materialize_state(transition.next_key)
         transitioned_states.append(next_state)
         next_states[idx] = next_state
-        if engine.is_target_state_fn(next_state):
+        if objective_mode:
+            rewards[idx] = float(reward_function(state, next_state))
+        elif engine.is_target_state_fn(next_state):
             rewards[idx] = 1.0
             dones[idx] = True
             terminal_reasons[idx] = "frt_or_frst"
@@ -923,12 +927,17 @@ def format_rollout_summary(
     mean_candidates = float(summary.total_candidates) / env_steps
     valid_action_fraction = float(summary.total_valid_actions) / env_steps
     parts = [
-        f"{label}: success_rate={summary.success_rate:.4f}",
+        f"{label}: return={summary.return_mean:.4f}",
+        f"return_std={summary.return_std:.4f}",
+        f"return_min={summary.return_min:.4f}",
+        f"return_max={summary.return_max:.4f}",
         f"discounted_reward={summary.discounted_reward:.4f}",
+        f"success_rate={summary.success_rate:.4f}",
     ]
     if abs(float(summary.intrinsic_bonus_mean)) > 0.0:
         parts.extend(
             [
+                f"training_return={summary.training_return_mean:.4f}",
                 f"training_discounted_reward={summary.training_discounted_reward:.4f}",
                 f"intrinsic_bonus_mean={summary.intrinsic_bonus_mean:.4f}",
             ]
@@ -947,7 +956,64 @@ def format_rollout_summary(
             f"discovered_states={summary.discovered_states}",
         ]
     )
+    objective_metrics = summarize_objective_performance(summary)
+    if objective_metrics:
+        parts.extend(
+            [
+                f"objective_initial_mean={objective_metrics['initial_mean']:.4f}",
+                f"objective_final_mean={objective_metrics['final_mean']:.4f}",
+                f"objective_best_mean={objective_metrics['best_mean']:.4f}",
+                f"objective_mean_improvement={objective_metrics['mean_improvement']:.4f}",
+                f"objective_improved_fraction={objective_metrics['improved_fraction']:.4f}",
+            ]
+        )
     return " ".join(parts)
+
+
+def rollout_return_statistics(return_values: Sequence[float]) -> dict[str, float]:
+    values = np.asarray(return_values, dtype=np.float64)
+    if values.size == 0:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+    return {
+        "mean": float(values.mean()),
+        "std": float(values.std()),
+        "min": float(values.min()),
+        "max": float(values.max()),
+    }
+
+
+def summarize_objective_performance(summary: PolicyRolloutSummary) -> dict[str, float]:
+    if summary.objective_name is None:
+        return {}
+
+    initial_values = list(summary.objective_initial_values or ())
+    final_values = list(summary.objective_final_values or ())
+    best_values = list(summary.objective_best_values or ())
+    if not initial_values or not (
+        len(initial_values) == len(final_values) == len(best_values)
+    ):
+        raise ValueError("Objective metric arrays must be non-empty and have equal lengths.")
+
+    if summary.objective_goal == "min":
+        improvements = [
+            float(initial) - float(best)
+            for initial, best in zip(initial_values, best_values)
+        ]
+    elif summary.objective_goal == "max":
+        improvements = [
+            float(best) - float(initial)
+            for initial, best in zip(initial_values, best_values)
+        ]
+    else:
+        raise ValueError(f"Unsupported objective goal '{summary.objective_goal}'.")
+
+    return {
+        "initial_mean": float(np.mean(initial_values)),
+        "final_mean": float(np.mean(final_values)),
+        "best_mean": float(np.mean(best_values)),
+        "mean_improvement": float(np.mean(improvements)),
+        "improved_fraction": float(np.mean(np.asarray(improvements) > 0.0)),
+    }
 
 
 def _state_key(state: Any) -> str:
@@ -1051,8 +1117,25 @@ def collect_policy_rollout(
     vertex_aug_scale_max: float = 1.1,
     vertex_aug_shift_std: float = 0.05,
     vertex_aug_reflect_prob: float = 0.1,
+    objective_function: Callable[[Any], float] | None = None,
+    objective_name: str | None = None,
+    objective_goal: str | None = None,
 ) -> PolicyRolloutSummary:
     states = engine.sample_initial_states(num_envs, rng=rng, initial_state_pool=initial_state_pool)
+    if objective_function is not None and objective_goal not in {"min", "max"}:
+        raise ValueError("objective_goal must be 'min' or 'max' with objective_function.")
+    objective_initial_values = (
+        [float(objective_function(state)) for state in states]
+        if objective_function is not None
+        else None
+    )
+    objective_final_values = (
+        list(objective_initial_values) if objective_initial_values is not None else None
+    )
+    objective_best_values = (
+        list(objective_initial_values) if objective_initial_values is not None else None
+    )
+    objective_first_episode_active = [True for _ in states]
     trajectory_transforms = None
     if bool(vertex_aug_enable):
         trajectory_transforms = sample_cy_trajectory_transforms(
@@ -1085,6 +1168,8 @@ def collect_policy_rollout(
     total_transition_apply_sec = 0.0
     total_intrinsic_bonus = 0.0
     total_intrinsic_bonus_count = 0
+    rollout_returns = np.zeros(len(states), dtype=np.float64)
+    training_rollout_returns = np.zeros(len(states), dtype=np.float64)
 
     for step_index in range(int(rollout_length)):
         increment_visitation(
@@ -1120,6 +1205,25 @@ def collect_policy_rollout(
         ]
         step_result.intrinsic_bonus = intrinsic_bonus
         step_result.training_rewards = training_rewards
+        rollout_returns += np.asarray(step_result.rewards, dtype=np.float64)
+        training_rollout_returns += np.asarray(training_rewards, dtype=np.float64)
+
+        if objective_function is not None:
+            for idx, transitioned_state in enumerate(step_result.transitioned_states):
+                if not objective_first_episode_active[idx]:
+                    continue
+                objective_value = float(objective_function(transitioned_state))
+                objective_final_values[idx] = objective_value
+                if objective_goal == "min":
+                    objective_best_values[idx] = min(
+                        objective_best_values[idx], objective_value
+                    )
+                else:
+                    objective_best_values[idx] = max(
+                        objective_best_values[idx], objective_value
+                    )
+                if step_result.dones[idx]:
+                    objective_first_episode_active[idx] = False
         total_intrinsic_bonus += float(sum(intrinsic_bonus))
         total_intrinsic_bonus_count += len(intrinsic_bonus)
 
@@ -1156,28 +1260,8 @@ def collect_policy_rollout(
         total_policy_action_inference_sec += float(step_result.policy_action_inference_sec)
         total_transition_apply_sec += float(step_result.transition_apply_sec)
 
-        should_report = report_every > 0 and (
-            step_index == 0
-            or (step_index + 1) % int(report_every) == 0
-            or (step_index + 1) == int(rollout_length)
-        )
-        if should_report:
-            step_reward = float(np.mean(step_result.rewards)) if step_result.rewards else 0.0
-            step_intrinsic_bonus = float(np.mean(intrinsic_bonus)) if intrinsic_bonus else 0.0
-            done_fraction = float(np.mean(step_result.dones)) if step_result.dones else 0.0
-            parts = [
-                f"{label} step={step_index + 1}/{rollout_length}",
-                f"reward_mean={step_reward:.4f}",
-            ]
-            if use_count_bonus:
-                parts.append(f"intrinsic_bonus_mean={step_intrinsic_bonus:.4f}")
-            parts.extend(
-                [
-                    f"done_fraction={done_fraction:.4f}",
-                    f"first_episode_finished={tracker.finished_fraction():.4f}",
-                ]
-            )
-            print(" ".join(parts))
+    return_stats = rollout_return_statistics(rollout_returns)
+    training_return_stats = rollout_return_statistics(training_rollout_returns)
 
     return PolicyRolloutSummary(
         final_states=states,
@@ -1209,6 +1293,16 @@ def collect_policy_rollout(
         ),
         training_discounted_reward=training_tracker.mean_discounted_reward(),
         trajectory_transforms=trajectory_transforms,
+        objective_name=objective_name if objective_function is not None else None,
+        objective_goal=objective_goal if objective_function is not None else None,
+        objective_initial_values=objective_initial_values,
+        objective_final_values=objective_final_values,
+        objective_best_values=objective_best_values,
+        return_mean=return_stats["mean"],
+        return_std=return_stats["std"],
+        return_min=return_stats["min"],
+        return_max=return_stats["max"],
+        training_return_mean=training_return_stats["mean"],
     )
 
 

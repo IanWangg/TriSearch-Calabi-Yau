@@ -273,6 +273,9 @@ def test_collect_policy_rollout_over_initial_states_uses_each_initial_state_once
     assert math.isclose(summary.rollout_length_mean, 4.0 / 3.0)
     assert summary.rollout_length_min == 1
     assert summary.rollout_length_max == 2
+    assert math.isclose(summary.return_mean, 1.0 / 3.0)
+    assert summary.return_min == -1.0
+    assert summary.return_max == 1.0
 
 
 def test_collect_random_rollout_over_initial_states_uses_uniform_random_step():
@@ -357,6 +360,9 @@ def test_collect_random_rollout_over_initial_states_uses_uniform_random_step():
     assert math.isclose(summary.rollout_length_mean, 4.0 / 3.0)
     assert summary.rollout_length_min == 1
     assert summary.rollout_length_max == 2
+    assert summary.return_mean == 0.0
+    assert summary.return_min == -1.0
+    assert summary.return_max == 1.0
 
 
 def test_build_summary_payload_includes_rollout_length_record():
@@ -386,6 +392,10 @@ def test_build_summary_payload_includes_rollout_length_record():
             policy_value_inference_sec=0.4,
             policy_action_inference_sec=0.5,
             transition_apply_sec=0.6,
+            return_mean=2.0,
+            return_std=0.5,
+            return_min=1.0,
+            return_max=3.0,
         ),
         rollout_lengths=[2, 4, 4],
     )
@@ -418,6 +428,10 @@ def test_build_summary_payload_includes_rollout_length_record():
     assert math.isclose(payload["rollout_length_mean"], 10.0 / 3.0)
     assert payload["rollout_length_min"] == 2
     assert payload["rollout_length_max"] == 4
+    assert payload["return_mean"] == 2.0
+    assert payload["return_std"] == 0.5
+    assert payload["return_min"] == 1.0
+    assert payload["return_max"] == 3.0
 
 
 def test_resolve_eval_vertex_preprocessor_rejects_random_rollout_preprocessing():

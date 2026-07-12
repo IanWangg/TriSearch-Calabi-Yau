@@ -312,9 +312,10 @@ def build_cy_rollout_collection(
     )
 
 
-def _expand_cy_state_worker(state: Any) -> CYStateExpansion:
+def _expand_cy_state_worker(payload: Tuple[Any, bool]) -> CYStateExpansion:
+    state, objective_mode = payload
     simplices = _sorted_simplices_tuple(getattr(state, "simplices", ()))
-    if default_is_target_state(state) or len(simplices) <= 1:
+    if not objective_mode and (default_is_target_state(state) or len(simplices) <= 1):
         return CYStateExpansion(
             key=str(state.key),
             point_config_index=int(state.point_config_index),
@@ -375,6 +376,7 @@ class CYRandomRolloutEngine:
         max_hot_states: int = 100000,
         state_factory: Optional[Callable[[int, CanonicalSimplices], Any]] = None,
         is_target_state_fn: Optional[Callable[[Any], bool]] = None,
+        reward_function: Optional[Callable[[Any, Any], float]] = None,
     ):
         if collection is not None:
             base_states = collection.base_states
@@ -394,6 +396,7 @@ class CYRandomRolloutEngine:
         )
         self.state_factory = state_factory or self._default_state_factory
         self.is_target_state_fn = is_target_state_fn or default_is_target_state
+        self.reward_function = reward_function
 
         self.nodes_by_key: Dict[str, CYGraphNode] = {}
         self.graph_by_polytope: Dict[int, Dict[str, CYGraphNode]] = {}
@@ -499,6 +502,9 @@ class CYRandomRolloutEngine:
             return ExpandSummary(expanded_count=0, discovered_count=0, used_multiprocessing=False)
 
         pending_states = list(unique_unexpanded.values())
+        expansion_payloads = [
+            (state, self.reward_function is not None) for state in pending_states
+        ]
         use_mp = (
             bool(use_multiprocessing)
             and not _CY_ROLLOUT_MP_DISABLED
@@ -510,7 +516,7 @@ class CYRandomRolloutEngine:
             try:
                 expansion_outputs = transition_pool.map(
                     _expand_cy_state_worker,
-                    pending_states,
+                    expansion_payloads,
                     chunksize=max(1, int(transition_mp_chunksize)),
                 )
             except Exception as exc:
@@ -522,10 +528,14 @@ class CYRandomRolloutEngine:
                     stacklevel=2,
                 )
                 _CY_ROLLOUT_MP_DISABLED = True
-                expansion_outputs = [_expand_cy_state_worker(state) for state in pending_states]
+                expansion_outputs = [
+                    _expand_cy_state_worker(payload) for payload in expansion_payloads
+                ]
                 use_mp = False
         else:
-            expansion_outputs = [_expand_cy_state_worker(state) for state in pending_states]
+            expansion_outputs = [
+                _expand_cy_state_worker(payload) for payload in expansion_payloads
+            ]
 
         discovered = 0
         for expansion in expansion_outputs:
@@ -655,6 +665,7 @@ class CYRandomRolloutEngine:
         dead_end_hits = 0
 
         unique_nonterminal_next_keys: Dict[str, None] = {}
+        objective_mode = self.reward_function is not None
         for idx, (state, action_candidates) in enumerate(zip(current_states, action_lists)):
             if len(action_candidates) == 0:
                 transitioned_states.append(state)
@@ -669,7 +680,7 @@ class CYRandomRolloutEngine:
             chosen_actions.append(action)
 
             transition = self.nodes_by_key[str(state.key)].transitions[action]
-            if transition.next_is_target is True:
+            if not objective_mode and transition.next_is_target is True:
                 rewards[idx] = 1.0
                 dones[idx] = True
                 terminal_reasons[idx] = "frt_or_frst"
@@ -677,7 +688,7 @@ class CYRandomRolloutEngine:
                 transitioned_states.append(state)
                 continue
 
-            if len(transition.next_simplices) <= 1:
+            if not objective_mode and len(transition.next_simplices) <= 1:
                 rewards[idx] = -1.0
                 dones[idx] = True
                 terminal_reasons[idx] = "single_simplex"
@@ -688,7 +699,9 @@ class CYRandomRolloutEngine:
             next_state = self.materialize_state(transition.next_key)
             transitioned_states.append(next_state)
             next_states[idx] = next_state
-            if self.is_target_state_fn(next_state):
+            if objective_mode:
+                rewards[idx] = float(self.reward_function(state, next_state))
+            elif self.is_target_state_fn(next_state):
                 rewards[idx] = 1.0
                 dones[idx] = True
                 terminal_reasons[idx] = "frt_or_frst"

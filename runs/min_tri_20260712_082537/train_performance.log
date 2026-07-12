@@ -1,0 +1,32 @@
+Mosek was successfully activated.
+
+/home/yiranwang/anaconda3/envs/sage/lib/python3.11/site-packages/cytools/config.py:154: UserWarning: 
+**************************************************************
+Warning: You have enabled experimental features of CYTools.
+Some of these features may be broken or not fully tested,
+and they may undergo significant changes in future versions.
+**************************************************************
+
+  warnings.warn(
+Using triangulation objective: reward=max_tri goal=max
+Using training device: cuda:0
+Using PyTorch CPU threads: intra_op=1 interop=1
+Loading CY dataset from data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl
+Dataset split: train_polytopes=480 eval_polytopes=20 coord_dim=3 train_mean_vertices=15.56 eval_mean_vertices=33.60
+Hardest eval polytopes: [6, 10, 223, 0, 8, 98, 254, 258, 234, 270]
+Built CY collections: train_initial_states=4626 eval_initial_states=400 time=3.63s
+Checkpoint directory already exists at ckpt/runs/min_tri_20260712_082537/checkpoints
+Using policy in_channels=3
+Using subcomplex_actor_type=gnn
+wandb: Currently logged in as: ywang_3 to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+/home/yiranwang/anaconda3/envs/sage/lib/python3.11/site-packages/wandb/analytics/sentry.py:279: DeprecationWarning: The `Scope.user` setter is deprecated in favor of `Scope.set_user()`.
+  self.scope.user = {"email": email}
+wandb: setting up run hqfhcmir
+/home/yiranwang/anaconda3/envs/sage/lib/python3.11/site-packages/wandb/analytics/sentry.py:279: DeprecationWarning: The `Scope.user` setter is deprecated in favor of `Scope.set_user()`.
+  self.scope.user = {"email": email}
+wandb: Tracking run with wandb version 0.23.1
+wandb: Run data is saved locally in runs/min_tri_20260712_082537/wandb/wandb/run-20260712_145539-hqfhcmir
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run algo-cy-max_tri-egnn-subcomplex-ppo-improved__hardest-eval-20__epochs-per-iter-1__min_tri_20260712_082537
+wandb: ⭐️ View project at https://wandb.ai/ywang_3/calabi_yau_min_tri
+wandb: 🚀 View run at https://wandb.ai/ywang_3/calabi_yau_min_tri/runs/hqfhcmir

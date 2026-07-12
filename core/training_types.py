@@ -131,6 +131,16 @@ class PolicyRolloutSummary:
     intrinsic_bonus_mean: float = 0.0
     training_discounted_reward: float = 0.0
     trajectory_transforms: List[Any] | None = None
+    objective_name: str | None = None
+    objective_goal: str | None = None
+    objective_initial_values: List[float] | None = None
+    objective_final_values: List[float] | None = None
+    objective_best_values: List[float] | None = None
+    return_mean: float = 0.0
+    return_std: float = 0.0
+    return_min: float = 0.0
+    return_max: float = 0.0
+    training_return_mean: float = 0.0
 
 
 @dataclass(frozen=True)

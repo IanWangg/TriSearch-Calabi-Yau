@@ -4,12 +4,20 @@ This repository is the Calabi-Yau extraction.
 
 ## Environment
 
-Use the existing `sage` conda environment. The repo expects Sage/CYTools and the PyTorch stack to be available there.
+Use the existing `sage` conda environment. Sage itself must be provided by the
+environment; the Python package requirements, including CYTools, Mosek, and the
+PyTorch stack, are listed in `requirements.txt` and `setup.py`.
 
 ```bash
 conda activate sage
+python -m pip install -r requirements.txt
+python -m pip install -e .
 python scripts/train_cy.py --help
 ```
+
+Do not install the requirements into a plain Python environment as a substitute
+for Sage. The training and geometry code expects both Sage and the packages
+above to be available in the same environment.
 
 CYTools regularity checks default to Mosek. Configure the license/backend with environment variables when needed:
 
@@ -52,6 +60,33 @@ python scripts/train_cy.py \
   --dry_run
 ```
 
+To optimize the number of simplices over the reachable regular-triangulation
+graph, use `--reward min_tri` to minimize or `--reward max_tri` to maximize.
+Both objectives use the signed change in simplex count as their dense reward.
+Unlike CY sampling mode, fine regular targets remain traversable and
+one-simplex destinations receive their objective reward before ending as
+no-action states.
+
+```bash
+python scripts/train_cy.py \
+  --reward min_tri \
+  --dataset_path data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl \
+  --max_rows 4 \
+  --num_eval_polytopes 1 \
+  --num_iterations 1 \
+  --num_epochs 1 \
+  --num_states 2 \
+  --rollout_length 1 \
+  --num_eval_states 2 \
+  --eval_steps 1 \
+  --batch_size 2 \
+  --deterministic_rollout \
+  --deterministic_eval \
+  --force_cpu \
+  --checkpoint_path /tmp/trisearch_cy_min_tri_smoke \
+  --dry_run
+```
+
 Checkpoint evaluation smoke:
 
 ```bash
@@ -64,6 +99,77 @@ python scripts/eval_cy.py \
   --force_cpu \
   --summary_path /tmp/trisearch_cy_eval_summary.json
 ```
+
+Objective checkpoints use the same model format, so pass the objective again
+when evaluating. The saved summary includes initial, final, and best simplex
+counts for every trajectory.
+
+```bash
+python scripts/eval_cy.py \
+  --reward min_tri \
+  --dataset_path data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl \
+  --checkpoint_path /tmp/trisearch_cy_min_tri_smoke/final.pth \
+  --max_rows 4 \
+  --num_eval_polytopes 1 \
+  --eval_steps 2 \
+  --deterministic_eval \
+  --force_cpu \
+  --summary_path /tmp/trisearch_cy_min_tri_smoke/eval_summary.json
+```
+
+## Training Logs
+
+Training reports one cumulative return summary after each complete rollout:
+
+```text
+Rollout: return=3.2734 return_std=1.2040 return_min=0.0000 return_max=6.0000 ...
+```
+
+For each parallel rollout slot, `return` sums the undiscounted extrinsic rewards
+over the full configured rollout horizon, including steps after a terminal
+reset. The displayed value is the mean across rollout slots; `return_std`,
+`return_min`, and `return_max` describe the same distribution. When count-based
+exploration is enabled, `training_return` additionally includes the intrinsic
+bonus. The older `discounted_reward` remains available as a first-episode
+diagnostic, but it is not the primary cumulative-return metric.
+
+Use `--use_wandb` for online experiment tracking and `tee` for a persistent
+local performance log. Do not combine this with `--dry_run`, which disables
+W&B.
+
+```bash
+RUN_ID="max_tri_$(date +%Y%m%d_%H%M%S)"
+RUN_DIR="runs/${RUN_ID}"
+mkdir -p "${RUN_DIR}/wandb" "${RUN_DIR}/checkpoints"
+set -o pipefail
+
+WANDB_MODE=online \
+WANDB_DIR="${RUN_DIR}/wandb" \
+PYTHONUNBUFFERED=1 \
+python scripts/train_cy.py \
+  --dataset_path data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl \
+  --reward max_tri \
+  --num_iterations 1000 \
+  --num_states 128 \
+  --rollout_length 20 \
+  --batch_size 128 \
+  --num_eval_polytopes 20 \
+  --num_eval_states 128 \
+  --eval_steps 30 \
+  --eval_interval 100 \
+  --checkpoint_path "${RUN_DIR}/checkpoints" \
+  --latest_checkpoint_interval 10 \
+  --save_interval 500 \
+  --use_wandb \
+  --wandb_project calabi_yau_max_tri \
+  --name_suffix "${RUN_ID}" \
+  2>&1 | tee "${RUN_DIR}/train_performance.log"
+```
+
+W&B records the primary metric as `rollout/return`, its distribution under
+`rollout/return_std`, `rollout/return_min`, and `rollout/return_max`, and held-out
+statistics under `eval/return_mean`, `eval/return_std`, `eval/return_min`, and
+`eval/return_max`.
 
 Random rollout sampling:
 

@@ -4,7 +4,9 @@ setup(
     name="trisearch_calabi_yau",
     version="0.1.0",
     description="Calabi-Yau triangulation training and sampling tools",
-    packages=find_namespace_packages(include=["core*", "data*", "mdp*", "models*"]),
+    packages=find_namespace_packages(
+        include=["core*", "data*", "mdp*", "models*", "reward_functions*"]
+    ),
     python_requires=">=3.10",
     install_requires=[
         "numpy",
@@ -17,6 +19,8 @@ setup(
         "datasets",
         "huggingface_hub",
         "scikit-learn",
+        "cytools",
+        "Mosek",
     ],
     include_package_data=True,
 )

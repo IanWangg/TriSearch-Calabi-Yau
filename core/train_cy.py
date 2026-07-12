@@ -45,8 +45,10 @@ from core.cy_policy_rollout_utils import (
     normalize_advantages_masked,
     compute_explained_variance,
     collect_policy_rollout,
+    summarize_objective_performance,
     train_policy_from_rollout,
 )
+from reward_functions import SUPPORTED_REWARDS, get_objective, get_reward, infer_goal
 
 if TYPE_CHECKING:
     from core.cy_policy_rollout_utils import PPORolloutBuffer, PreparedPPORolloutBatch
@@ -74,6 +76,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Forwarded to cytools Polytope.triangulate(...).",
+    )
+    parser.add_argument(
+        "--reward_function",
+        "--reward",
+        dest="reward_function",
+        choices=SUPPORTED_REWARDS,
+        default=None,
+        help="Optional triangulation objective. Omit to keep CY sampling rewards.",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument(
@@ -310,7 +320,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--report_every",
         type=int,
         default=0,
-        help="Print rollout progress every N steps. <=0 disables per-step progress logs.",
+        help="Deprecated compatibility option; training rollouts are summarized once after completion.",
     )
     parser.add_argument(
         "--dry_run",
@@ -351,8 +361,11 @@ def save_iteration_checkpoints(
 
 
 def build_wandb_run_name(args: argparse.Namespace) -> str:
+    objective_token = (
+        f"{args.reward_function}-" if getattr(args, "reward_function", None) else ""
+    )
     run_name = (
-        "algo-cy-egnn-subcomplex-ppo-improved__"
+        f"algo-cy-{objective_token}egnn-subcomplex-ppo-improved__"
         f"hardest-eval-{int(args.num_eval_polytopes)}__"
         f"epochs-per-iter-{int(args.num_epochs)}"
     )
@@ -589,6 +602,23 @@ def main(args: argparse.Namespace) -> None:
     if args.dry_run:
         apply_dry_run_overrides(args)
 
+    reward_function = (
+        get_reward(args.reward_function) if args.reward_function is not None else None
+    )
+    objective_function = (
+        get_objective(args.reward_function) if args.reward_function is not None else None
+    )
+    objective_goal = (
+        infer_goal(args.reward_function) if args.reward_function is not None else None
+    )
+    if reward_function is None:
+        print("Using CY sampling reward.")
+    else:
+        print(
+            f"Using triangulation objective: reward={args.reward_function} "
+            f"goal={objective_goal}"
+        )
+
     device = resolve_training_device(gpu_index=args.gpu_index, force_cpu=bool(args.force_cpu))
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -639,22 +669,25 @@ def main(args: argparse.Namespace) -> None:
         include_points_interior_to_facets=args.include_points_interior_to_facets,
         state_cache_mode=args.state_cache_mode,
         max_hot_states=args.max_hot_states,
+        reward_function=reward_function,
     )
     eval_engine = CYRandomRolloutEngine(
         collection=eval_collection,
         include_points_interior_to_facets=args.include_points_interior_to_facets,
         state_cache_mode=args.state_cache_mode,
         max_hot_states=args.max_hot_states,
+        reward_function=reward_function,
     )
     subcomplex_actor_type = normalize_subcomplex_actor_type(
         getattr(args, "subcomplex_actor_type", "gnn")
     )
 
+    objective_prefix = f"{args.reward_function}_" if args.reward_function else ""
     checkpoint_dir = build_checkpoint_dir(
         checkpoint_path=args.checkpoint_path,
         default_dir=append_coordinate_dim_suffix(
             (
-                f"ckpt/cy_subcomplex_ppo_improved_"
+                f"ckpt/cy_{objective_prefix}subcomplex_ppo_improved_"
                 f"{int(args.num_states)}state_{int(args.rollout_length)}rollout"
                 f"{build_training_variant_suffix(args)}"
                 f"{'_' + args.name_suffix if args.name_suffix else ''}"
@@ -698,6 +731,7 @@ def main(args: argparse.Namespace) -> None:
                 "coordinate_dim": dataset_coordinate_dim,
                 "resolved_in_channels": resolved_in_channels,
                 "subcomplex_actor_type": subcomplex_actor_type,
+                "objective_goal": objective_goal,
                 "train_polytopes": len(split.train_polytope_indices),
                 "eval_polytopes": len(split.eval_polytope_indices),
                 "train_mean_vertices": mean_vertex_count(split.train_rows),
@@ -778,6 +812,9 @@ def main(args: argparse.Namespace) -> None:
                 vertex_aug_scale_max=float(args.vertex_aug_scale_max),
                 vertex_aug_shift_std=float(args.vertex_aug_shift_std),
                 vertex_aug_reflect_prob=float(args.vertex_aug_reflect_prob),
+                objective_function=objective_function,
+                objective_name=args.reward_function,
+                objective_goal=objective_goal,
             )
             rollout_sec = time.perf_counter() - rollout_start
             print(
@@ -854,6 +891,9 @@ def main(args: argparse.Namespace) -> None:
                     store_buffer=False,
                     report_every=0,
                     label="eval",
+                    objective_function=objective_function,
+                    objective_name=args.reward_function,
+                    objective_goal=objective_goal,
                 )
                 eval_sec = time.perf_counter() - eval_start
                 print(
@@ -933,6 +973,11 @@ def main(args: argparse.Namespace) -> None:
                 import wandb
 
                 payload = {
+                    "rollout/return": rollout_summary.return_mean,
+                    "rollout/return_std": rollout_summary.return_std,
+                    "rollout/return_min": rollout_summary.return_min,
+                    "rollout/return_max": rollout_summary.return_max,
+                    "rollout/training_return": rollout_summary.training_return_mean,
                     "rollout/success_rate": rollout_summary.success_rate,
                     "rollout/discounted_reward": rollout_summary.discounted_reward,
                     "rollout/training_discounted_reward": rollout_summary.training_discounted_reward,
@@ -986,9 +1031,20 @@ def main(args: argparse.Namespace) -> None:
                     "timing/rollout_policy_action_inference_sec": rollout_summary.policy_action_inference_sec,
                     "timing/rollout_transition_apply_sec": rollout_summary.transition_apply_sec,
                 }
+                rollout_objective_metrics = summarize_objective_performance(rollout_summary)
+                payload.update(
+                    {
+                        f"rollout/objective_{name}": value
+                        for name, value in rollout_objective_metrics.items()
+                    }
+                )
                 if eval_summary is not None:
                     payload.update(
                         {
+                            "eval/return_mean": eval_summary.return_mean,
+                            "eval/return_std": eval_summary.return_std,
+                            "eval/return_min": eval_summary.return_min,
+                            "eval/return_max": eval_summary.return_max,
                             "eval/success_rate": eval_summary.success_rate,
                             "eval/discounted_reward": eval_summary.discounted_reward,
                             "eval/finished_fraction": eval_summary.finished_fraction,
@@ -1000,6 +1056,13 @@ def main(args: argparse.Namespace) -> None:
                             "eval/all_step_frt_hits": eval_summary.all_step_frt_hits,
                             "eval/all_step_collapsed_hits": eval_summary.all_step_collapsed_hits,
                             "eval/all_step_dead_end_hits": eval_summary.all_step_dead_end_hits,
+                        }
+                    )
+                    eval_objective_metrics = summarize_objective_performance(eval_summary)
+                    payload.update(
+                        {
+                            f"eval/objective_{name}": value
+                            for name, value in eval_objective_metrics.items()
                         }
                     )
                 wandb.log(payload, step=iteration)
@@ -1028,6 +1091,10 @@ def main(args: argparse.Namespace) -> None:
     finally:
         if transition_pool is not None:
             transition_pool.shutdown()
+        if args.use_wandb:
+            import wandb
+
+            wandb.finish()
 
 
 if __name__ == "__main__":
