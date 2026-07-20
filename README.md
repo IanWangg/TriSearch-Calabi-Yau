@@ -4,20 +4,26 @@ This repository is the Calabi-Yau extraction.
 
 ## Environment
 
-Use the existing `sage` conda environment. Sage itself must be provided by the
-environment; the Python package requirements, including CYTools, Mosek, and the
-PyTorch stack, are listed in `requirements.txt` and `setup.py`.
+Create the project environment from the checked-in YAML. It mirrors the
+Linux/CUDA 11.8 `sage` environment used for development and installs this
+repository in editable mode.
 
 ```bash
-conda activate sage
-python -m pip install -r requirements.txt
-python -m pip install -e .
+conda env create -f environment.yml
+conda activate trisearch_calabi_yau
 python scripts/train_cy.py --help
 ```
 
-Do not install the requirements into a plain Python environment as a substitute
-for Sage. The training and geometry code expects both Sage and the packages
-above to be available in the same environment.
+To update an environment that was already created from the file:
+
+```bash
+conda env update -f environment.yml --prune
+```
+
+Do not install `requirements.txt` into a plain Python environment as a
+substitute for the YAML. The training and geometry code expects Sage, the
+matching CUDA/PyTorch/PyG stack, and the Python packages to be available in the
+same environment.
 
 CYTools regularity checks default to Mosek. Configure the license/backend with environment variables when needed:
 

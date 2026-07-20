@@ -1,0 +1,33 @@
+name: trisearch_calabi_yau
+
+channels:
+  - conda-forge
+  - nodefaults
+
+# This reproduces the Linux/CUDA stack used for development. The NVIDIA driver
+# is supplied by the host and is intentionally not part of the environment.
+dependencies:
+  - python=3.11
+  - sage=10.6
+  - scipy=1.15.2
+  - tqdm=4.67.1
+  - wandb=0.23.1
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu118
+      - --find-links https://data.pyg.org/whl/torch-2.4.0+cu118.html
+      - torch==2.4.1+cu118
+      - torch-geometric==2.6.1
+      - torch-cluster==1.6.3+pt24cu118
+      - torch-scatter==2.1.2+pt24cu118
+      - torch-sparse==0.6.18+pt24cu118
+      - torch-spline-conv==1.2.2+pt24cu118
+      - numpy==2.3.5
+      - pandas==2.2.3
+      - datasets==3.3.2
+      - huggingface-hub==0.29.1
+      - scikit-learn==1.6.1
+      - cytools==1.4.12
+      - Mosek==11.1.10
+      - pytest==9.0.2
+      - -e .
