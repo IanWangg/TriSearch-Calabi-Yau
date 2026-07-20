@@ -158,6 +158,27 @@ def test_cached_candidate_memberships_match_dense_containment():
     assert torch.equal(topology.snn_simplex, expected_simplex)
 
 
+def test_lower_dimensional_circuit_memberships_use_top_simplex_cofaces():
+    simplex_vertices = torch.tensor(
+        [
+            [0, 1, 2, 3, 5],
+            [0, 1, 3, 4, 6],
+            [0, 1, 2, 5, 6],
+            [0, 2, 3, 4, 6],
+        ],
+        dtype=torch.long,
+    )
+    subcomplex_vertices = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+
+    topology = build_snn_simplex_topology_tensors(
+        simplex_vertices=simplex_vertices,
+        subcomplex_vertices=subcomplex_vertices,
+    )
+
+    assert torch.equal(topology.snn_candidate, torch.tensor([0, 0, 0]))
+    assert torch.equal(topology.snn_simplex, torch.tensor([0, 1, 3]))
+
+
 def test_pyg_batch_preserves_cached_local_topology_without_incrementing():
     graph_1 = _build_graph(
         num_nodes=4,

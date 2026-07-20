@@ -34,6 +34,7 @@ Curated runnable artifacts are included:
 
 - 3D sample dataset: `data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl`
 - 4D sample dataset: `data/cy/output4d/cy4d_random_flip_100_3_random_flip.samples.jsonl`
+- Compact two-neighbor h11=12 experiment dataset: `data/cy/two_neighbors_h11_12.samples.jsonl`
 - 4D policy checkpoint: `ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/final.pth`
 - K3 source data: `cy_data/k3.txt`
 
@@ -117,6 +118,46 @@ python scripts/eval_cy.py \
   --summary_path /tmp/trisearch_cy_min_tri_smoke/eval_summary.json
 ```
 
+### FRST-only CY volume optimization
+
+Use `--neighbor_mode two_neighbors` to navigate only between CYTools FRST
+representatives whose 2-face restrictions differ by one diagonal flip. This
+mode requires `--no-include_points_interior_to_facets`, matching the point
+configuration on which CYTools constructs two-neighbor representatives. The
+model action is the changed four-vertex 2-face circuit; the rollout state still
+stores the complete FRST representative returned by CYTools.
+
+`max_cy_volume` maximizes the CY threefold volume at the stretched-cone tip
+computed from
+`cy.mori_cone_cap(in_basis=True).dual().tip_of_stretched_cone(c=1)`. The dense
+reward defaults to the raw potential difference `V(next_state) - V(state)`.
+Pass `--cy_volume_reward_transform log` to train on
+`log(V(next_state)) - log(V(state))`; raw Kcup volumes remain the metric shown
+in console and JSON summaries.
+
+```bash
+python scripts/train_cy.py \
+  --dataset_path data/cy/two_neighbors_h11_12.samples.jsonl \
+  --neighbor_mode two_neighbors \
+  --no-include_points_interior_to_facets \
+  --reward max_cy_volume \
+  --cy_volume_reward_transform log \
+  --num_eval_polytopes 4 \
+  --num_states 32 \
+  --rollout_length 5 \
+  --seed 0 \
+  --force_cpu \
+  --checkpoint_path /tmp/trisearch_cy_volume
+```
+
+Kcup is used instead of `toric_kahler_cone()` because its value is invariant
+across complete FRST representatives with the same 2-face restriction. The
+toric-cone construction is cheaper, but can assign different values to those
+representatives and therefore is not a well-defined objective on the
+two-face-equivalence state space. CYTools currently labels the two-neighbor and
+non-favorable CY paths as experimental; failures are surfaced directly, with
+no alternate volume formula or toric-cone fallback.
+
 ## Training Logs
 
 Training reports one cumulative return summary after each complete rollout:
@@ -170,6 +211,12 @@ W&B records the primary metric as `rollout/return`, its distribution under
 `rollout/return_std`, `rollout/return_min`, and `rollout/return_max`, and held-out
 statistics under `eval/return_mean`, `eval/return_std`, `eval/return_min`, and
 `eval/return_max`.
+
+For crash-resilient local tracking, `--iteration_metrics_path PATH.jsonl`
+writes and flushes one record after every PPO iteration. Each max-CY-volume
+record contains every train and held-out slot's raw initial, final, and best
+volume, best-volume improvement, aggregate volume statistics, return
+statistics, PPO losses, and timing.
 
 Random rollout sampling:
 

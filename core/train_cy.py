@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Sequence, TextIO
 
 import numpy as np
 import torch
@@ -48,7 +49,14 @@ from core.cy_policy_rollout_utils import (
     summarize_objective_performance,
     train_policy_from_rollout,
 )
-from reward_functions import SUPPORTED_REWARDS, get_objective, get_reward, infer_goal
+from reward_functions import (
+    CY_VOLUME_REWARD_TRANSFORMS,
+    SUPPORTED_REWARDS,
+    get_objective,
+    get_reward,
+    infer_goal,
+)
+from mdp.cy_triangulation_state import NEIGHBOR_MODES
 
 if TYPE_CHECKING:
     from core.cy_policy_rollout_utils import PPORolloutBuffer, PreparedPPORolloutBatch
@@ -78,12 +86,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Forwarded to cytools Polytope.triangulate(...).",
     )
     parser.add_argument(
+        "--neighbor_mode",
+        type=str,
+        choices=NEIGHBOR_MODES,
+        default="regular",
+        help="Use ordinary regular neighbors or CYTools FRST two-neighbors.",
+    )
+    parser.add_argument(
         "--reward_function",
         "--reward",
         dest="reward_function",
         choices=SUPPORTED_REWARDS,
         default=None,
         help="Optional triangulation objective. Omit to keep CY sampling rewards.",
+    )
+    parser.add_argument(
+        "--cy_volume_reward_transform",
+        type=str,
+        choices=CY_VOLUME_REWARD_TRANSFORMS,
+        default="raw",
+        help=(
+            "Transform for max_cy_volume transition rewards. 'raw' uses "
+            "V_next - V_current; 'log' uses log(V_next) - log(V_current)."
+        ),
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument(
@@ -309,6 +334,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint_path", type=str, default=None)
     parser.add_argument(
+        "--iteration_metrics_path",
+        type=str,
+        default=None,
+        help="Optional JSONL path flushed after every completed PPO iteration.",
+    )
+    parser.add_argument(
         "--name_suffix",
         type=str,
         default=None,
@@ -358,6 +389,151 @@ def save_iteration_checkpoints(
         save_policy_checkpoint(policy, os.path.join(checkpoint_dir, f"{iteration_one_based}.pth"))
     if latest_interval > 0 and iteration_one_based % int(latest_interval) == 0:
         save_policy_checkpoint(policy, os.path.join(checkpoint_dir, "latest.pth"))
+
+
+def validate_cy_volume_reward_transform_args(args: argparse.Namespace) -> None:
+    transform = str(getattr(args, "cy_volume_reward_transform", "raw")).strip().lower()
+    if transform not in CY_VOLUME_REWARD_TRANSFORMS:
+        raise ValueError(
+            f"Unknown cy_volume_reward_transform '{transform}'. "
+            f"Expected one of: {', '.join(CY_VOLUME_REWARD_TRANSFORMS)}."
+        )
+    if transform != "raw" and getattr(args, "reward_function", None) != "max_cy_volume":
+        raise ValueError(
+            "--cy_volume_reward_transform log requires --reward max_cy_volume."
+        )
+
+
+def _return_metrics_payload(summary: PolicyRolloutSummary) -> Dict[str, float]:
+    return {
+        "mean": float(summary.return_mean),
+        "std": float(summary.return_std),
+        "min": float(summary.return_min),
+        "max": float(summary.return_max),
+        "discounted_mean": float(summary.discounted_reward),
+        "training_mean": float(summary.training_return_mean),
+        "training_discounted_mean": float(summary.training_discounted_reward),
+    }
+
+
+def build_raw_volume_metrics(summary: PolicyRolloutSummary) -> Dict[str, Any]:
+    if summary.objective_name != "max_cy_volume":
+        raise ValueError("Raw volume metrics require objective_name='max_cy_volume'.")
+
+    initial_values = [float(value) for value in summary.objective_initial_values or ()]
+    final_values = [float(value) for value in summary.objective_final_values or ()]
+    best_values = [float(value) for value in summary.objective_best_values or ()]
+    if not initial_values or not (
+        len(initial_values) == len(final_values) == len(best_values)
+    ):
+        raise ValueError("Raw volume arrays must be non-empty and have equal lengths.")
+
+    improvements = [
+        best_volume - initial_volume
+        for initial_volume, best_volume in zip(initial_values, best_values)
+    ]
+    slots = [
+        {
+            "slot": slot,
+            "initial_volume": initial_volume,
+            "final_volume": final_volume,
+            "best_volume": best_volume,
+            "best_volume_improvement": improvement,
+        }
+        for slot, (initial_volume, final_volume, best_volume, improvement) in enumerate(
+            zip(initial_values, final_values, best_values, improvements)
+        )
+    ]
+    return {
+        "slots": slots,
+        "initial_mean": float(np.mean(initial_values)),
+        "final_mean": float(np.mean(final_values)),
+        "best_mean": float(np.mean(best_values)),
+        "mean_best_volume_improvement": float(np.mean(improvements)),
+        "improved_fraction": float(np.mean(np.asarray(improvements) > 0.0)),
+    }
+
+
+def _rollout_iteration_metrics_payload(
+    summary: PolicyRolloutSummary,
+    *,
+    deterministic: bool,
+    elapsed_sec: float,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "deterministic": bool(deterministic),
+        "return": _return_metrics_payload(summary),
+        "elapsed_sec": float(elapsed_sec),
+    }
+    if summary.objective_name == "max_cy_volume":
+        payload["raw_volume"] = build_raw_volume_metrics(summary)
+    return payload
+
+
+def build_iteration_metrics_record(
+    *,
+    iteration: int,
+    reward_function: str | None,
+    cy_volume_reward_transform: str,
+    rollout_summary: PolicyRolloutSummary,
+    eval_summary: PolicyRolloutSummary | None,
+    train_stats: PPOTrainStats,
+    deterministic_rollout: bool,
+    deterministic_eval: bool,
+    rollout_sec: float,
+    bootstrap_sec: float,
+    prepare_sec: float,
+    train_sec: float,
+    eval_sec: float,
+    iteration_sec: float,
+) -> Dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "iteration": int(iteration) + 1,
+        "reward_function": reward_function,
+        "cy_volume_reward_transform": str(cy_volume_reward_transform),
+        "train": _rollout_iteration_metrics_payload(
+            rollout_summary,
+            deterministic=deterministic_rollout,
+            elapsed_sec=rollout_sec,
+        ),
+        "eval": (
+            None
+            if eval_summary is None
+            else _rollout_iteration_metrics_payload(
+                eval_summary,
+                deterministic=deterministic_eval,
+                elapsed_sec=eval_sec,
+            )
+        ),
+        "ppo": {
+            "total_loss": float(train_stats.total_loss),
+            "policy_loss": float(train_stats.policy_loss),
+            "value_loss": float(train_stats.value_loss),
+            "entropy_loss": float(train_stats.entropy_loss),
+            "explained_variance": float(train_stats.explained_variance),
+            "clip_ratio": float(train_stats.clip_ratio),
+            "num_samples": int(train_stats.num_samples),
+            "num_valid_action_samples": int(train_stats.num_valid_action_samples),
+        },
+        "timing": {
+            "rollout_sec": float(rollout_sec),
+            "bootstrap_sec": float(bootstrap_sec),
+            "prepare_sec": float(prepare_sec),
+            "train_sec": float(train_sec),
+            "eval_sec": float(eval_sec),
+            "iteration_sec": float(iteration_sec),
+        },
+    }
+
+
+def write_iteration_metrics_record(
+    metrics_stream: TextIO,
+    record: Dict[str, Any],
+) -> None:
+    metrics_stream.write(json.dumps(record, sort_keys=True, allow_nan=False))
+    metrics_stream.write("\n")
+    metrics_stream.flush()
 
 
 def build_wandb_run_name(args: argparse.Namespace) -> str:
@@ -458,6 +634,18 @@ def validate_count_bonus_args(args: argparse.Namespace) -> None:
         )
 
 
+def validate_neighbor_mode_args(args: argparse.Namespace) -> None:
+    if (
+        str(getattr(args, "neighbor_mode", "regular")) == "two_neighbors"
+        and bool(args.include_points_interior_to_facets)
+    ):
+        raise ValueError(
+            "--neighbor_mode two_neighbors requires "
+            "--no-include_points_interior_to_facets because CYTools constructs "
+            "two-neighbor representatives on that point configuration."
+        )
+
+
 def configure_torch_cpu_threads(args: argparse.Namespace) -> Dict[str, int]:
     torch_num_threads = int(getattr(args, "torch_num_threads", 1))
     torch_num_interop_threads = int(getattr(args, "torch_num_interop_threads", 1))
@@ -521,6 +709,9 @@ def build_training_variant_suffix(args: argparse.Namespace) -> str:
             "_exp"
             f"{format_float_suffix(count_bonus_exponent)}"
         )
+
+    if str(getattr(args, "neighbor_mode", "regular")) == "two_neighbors":
+        suffix_parts.append("two_neighbors")
 
     if not suffix_parts:
         return ""
@@ -598,15 +789,24 @@ def main(args: argparse.Namespace) -> None:
         reflect_prob=float(args.vertex_aug_reflect_prob),
     )
     validate_count_bonus_args(args)
+    validate_neighbor_mode_args(args)
+    validate_cy_volume_reward_transform_args(args)
     set_seeds(args.seed)
     if args.dry_run:
         apply_dry_run_overrides(args)
 
     reward_function = (
-        get_reward(args.reward_function) if args.reward_function is not None else None
+        get_reward(
+            args.reward_function,
+            cy_volume_reward_transform=args.cy_volume_reward_transform,
+        )
+        if args.reward_function is not None
+        else None
     )
     objective_function = (
-        get_objective(args.reward_function) if args.reward_function is not None else None
+        get_objective(args.reward_function, reward=reward_function)
+        if args.reward_function is not None
+        else None
     )
     objective_goal = (
         infer_goal(args.reward_function) if args.reward_function is not None else None
@@ -616,7 +816,8 @@ def main(args: argparse.Namespace) -> None:
     else:
         print(
             f"Using triangulation objective: reward={args.reward_function} "
-            f"goal={objective_goal}"
+            f"goal={objective_goal} "
+            f"cy_volume_reward_transform={args.cy_volume_reward_transform}"
         )
 
     device = resolve_training_device(gpu_index=args.gpu_index, force_cpu=bool(args.force_cpu))
@@ -651,10 +852,12 @@ def main(args: argparse.Namespace) -> None:
     train_collection = build_cy_rollout_collection(
         split.train_rows,
         include_points_interior_to_facets=args.include_points_interior_to_facets,
+        neighbor_mode=args.neighbor_mode,
     )
     eval_collection = build_cy_rollout_collection(
         split.eval_rows,
         include_points_interior_to_facets=args.include_points_interior_to_facets,
+        neighbor_mode=args.neighbor_mode,
     )
     build_sec = time.perf_counter() - build_start
     print(
@@ -670,6 +873,7 @@ def main(args: argparse.Namespace) -> None:
         state_cache_mode=args.state_cache_mode,
         max_hot_states=args.max_hot_states,
         reward_function=reward_function,
+        neighbor_mode=args.neighbor_mode,
     )
     eval_engine = CYRandomRolloutEngine(
         collection=eval_collection,
@@ -677,6 +881,7 @@ def main(args: argparse.Namespace) -> None:
         state_cache_mode=args.state_cache_mode,
         max_hot_states=args.max_hot_states,
         reward_function=reward_function,
+        neighbor_mode=args.neighbor_mode,
     )
     subcomplex_actor_type = normalize_subcomplex_actor_type(
         getattr(args, "subcomplex_actor_type", "gnn")
@@ -740,6 +945,12 @@ def main(args: argparse.Namespace) -> None:
         )
 
     transition_pool = None
+    iteration_metrics_stream = None
+    if args.iteration_metrics_path is not None:
+        iteration_metrics_path = Path(args.iteration_metrics_path).expanduser()
+        iteration_metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        iteration_metrics_stream = iteration_metrics_path.open("w", encoding="utf-8")
+        print(f"Writing iteration metrics to {iteration_metrics_path}")
     if args.use_multiprocessing:
         transition_pool = create_transition_pool(
             num_workers=args.transition_num_workers,
@@ -969,6 +1180,25 @@ def main(args: argparse.Namespace) -> None:
                 f"iteration_sec={iteration_sec:.2f}"
             )
 
+            if iteration_metrics_stream is not None:
+                iteration_record = build_iteration_metrics_record(
+                    iteration=iteration,
+                    reward_function=args.reward_function,
+                    cy_volume_reward_transform=args.cy_volume_reward_transform,
+                    rollout_summary=rollout_summary,
+                    eval_summary=eval_summary,
+                    train_stats=train_stats,
+                    deterministic_rollout=bool(args.deterministic_rollout),
+                    deterministic_eval=bool(args.deterministic_eval),
+                    rollout_sec=rollout_sec,
+                    bootstrap_sec=bootstrap_sec,
+                    prepare_sec=prepare_sec,
+                    train_sec=train_sec,
+                    eval_sec=eval_sec,
+                    iteration_sec=iteration_sec,
+                )
+                write_iteration_metrics_record(iteration_metrics_stream, iteration_record)
+
             if args.use_wandb:
                 import wandb
 
@@ -1089,6 +1319,8 @@ def main(args: argparse.Namespace) -> None:
         save_policy_checkpoint(policy, os.path.join(checkpoint_dir, "final.pth"))
         save_policy_checkpoint(policy, os.path.join(checkpoint_dir, "latest.pth"))
     finally:
+        if iteration_metrics_stream is not None:
+            iteration_metrics_stream.close()
         if transition_pool is not None:
             transition_pool.shutdown()
         if args.use_wandb:

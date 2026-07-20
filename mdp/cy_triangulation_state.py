@@ -62,6 +62,94 @@ def _infer_vertices_from_cy_triangulation(triangulation: CYToolsTriangulation) -
 
 
 CYTransitionOutput = Tuple[FrozenSet[Tuple[int, ...]], FrozenSet[Tuple[int, ...]], str]
+NEIGHBOR_MODES = ("regular", "two_neighbors")
+
+
+def _normalize_neighbor_mode(neighbor_mode: str) -> str:
+    resolved_mode = str(neighbor_mode).strip().lower()
+    if resolved_mode not in NEIGHBOR_MODES:
+        raise ValueError(
+            f"Unknown neighbor_mode '{neighbor_mode}'. "
+            f"Expected one of: {', '.join(NEIGHBOR_MODES)}."
+        )
+    return resolved_mode
+
+
+def _state_key_for_neighbor_mode(
+    point_config_index: int,
+    simplices: FrozenSet[Tuple[int, ...]],
+    neighbor_mode: str,
+) -> str:
+    base_key = simplices_key(point_config_index, simplices)
+    if neighbor_mode == "regular":
+        return base_key
+    return f"{neighbor_mode}|{base_key}"
+
+
+def _face_restriction_map(triangulation: CYToolsTriangulation) -> Dict[
+    Tuple[int, ...], FrozenSet[Tuple[int, ...]]
+]:
+    restriction_getter = getattr(triangulation, "restrict", None)
+    if restriction_getter is None or not callable(restriction_getter):
+        raise RuntimeError(
+            "CYTools two_neighbors contract violation: triangulation does not expose restrict()."
+        )
+
+    face_restrictions: Dict[Tuple[int, ...], FrozenSet[Tuple[int, ...]]] = {}
+    for face_triangulation in restriction_getter(as_poly=True):
+        face_labels = tuple(sorted(int(label) for label in face_triangulation.labels))
+        if face_labels in face_restrictions:
+            raise RuntimeError(
+                "CYTools two_neighbors contract violation: duplicate 2-face restriction "
+                f"with labels {face_labels}."
+            )
+        face_restrictions[face_labels] = _normalize_simplices(
+            face_triangulation.simplices()
+        )
+    return face_restrictions
+
+
+def _two_neighbor_circuit(
+    source: CYToolsTriangulation,
+    destination: CYToolsTriangulation,
+) -> Tuple[int, ...]:
+    source_faces = _face_restriction_map(source)
+    destination_faces = _face_restriction_map(destination)
+    if source_faces.keys() != destination_faces.keys():
+        raise RuntimeError(
+            "CYTools two_neighbors contract violation: source and destination have "
+            "different 2-face sets."
+        )
+
+    changed_faces = [
+        face_labels
+        for face_labels in source_faces
+        if source_faces[face_labels] != destination_faces[face_labels]
+    ]
+    if len(changed_faces) != 1:
+        raise RuntimeError(
+            "CYTools two_neighbors contract violation: expected exactly one changed "
+            f"2-face, found {len(changed_faces)}."
+        )
+
+    face_labels = changed_faces[0]
+    removed = source_faces[face_labels] - destination_faces[face_labels]
+    added = destination_faces[face_labels] - source_faces[face_labels]
+    removed_vertices = set().union(*(set(simplex) for simplex in removed)) if removed else set()
+    added_vertices = set().union(*(set(simplex) for simplex in added)) if added else set()
+    if (
+        len(removed) != 2
+        or len(added) != 2
+        or any(len(simplex) != 3 for simplex in removed.union(added))
+        or removed_vertices != added_vertices
+        or len(removed_vertices) != 4
+    ):
+        raise RuntimeError(
+            "CYTools two_neighbors contract violation: the changed 2-face is not a "
+            "2-to-2 diagonal flip on a four-vertex circuit "
+            f"(face={face_labels}, removed={sorted(removed)}, added={sorted(added)})."
+        )
+    return tuple(sorted(removed_vertices))
 
 
 class CYTriangulationState(TriangulationState):
@@ -89,7 +177,9 @@ class CYTriangulationState(TriangulationState):
         edges: Optional[Iterable[Iterable[int]]] = None,
         cy_triangulation: Optional[CYToolsTriangulation] = None,
         is_frst: Optional[bool] = None,
+        neighbor_mode: str = "regular",
     ):
+        self.neighbor_mode = _normalize_neighbor_mode(neighbor_mode)
         source_vertices = vertices
         source_simplices = simplices
         source_edges = edges
@@ -126,6 +216,17 @@ class CYTriangulationState(TriangulationState):
             edges=normalized_edges,
             triangulation=None,
         )
+        self.key = _state_key_for_neighbor_mode(
+            self.point_config_index,
+            self.simplices,
+            self.neighbor_mode,
+        )
+        if self.neighbor_mode == "two_neighbors":
+            self.available_subcomplex_actions = tuple()
+            self.subcomplex_to_flips = {}
+            self.ambiguous_subcomplex_actions = frozenset()
+            self.subcomplex_actions_ready = False
+            self._load_cached_subcomplex_actions()
 
         self.cy_triangulation = cy_triangulation
         if is_frst is not None:
@@ -185,17 +286,23 @@ class CYTriangulationState(TriangulationState):
         if self.cy_triangulation is None:
             raise AssertionError("cy_triangulation is not provided.")
         if self.neighbours is None:
-            try:
-                neighbours = self.cy_triangulation.neighbor_triangulations(only_regular=True)
-            except TypeError:
-                neighbours = self.cy_triangulation.neighbor_triangulations()
-                neighbours = [tri for tri in neighbours if _safe_bool_method_call(tri, "is_regular")]
+            if self.neighbor_mode == "two_neighbors":
+                neighbours = self.cy_triangulation.neighbor_triangulations(
+                    two_neighbors=True
+                )
+            else:
+                try:
+                    neighbours = self.cy_triangulation.neighbor_triangulations(only_regular=True)
+                except TypeError:
+                    neighbours = self.cy_triangulation.neighbor_triangulations()
+                    neighbours = [tri for tri in neighbours if _safe_bool_method_call(tri, "is_regular")]
             self.neighbours = list(neighbours)
         return self.neighbours
 
     def _compute_neighbor_flips(self) -> List[Tuple[FrozenSet[Tuple[int, ...]], FrozenSet[Tuple[int, ...]]]]:
         cached_flips = self._SHARED_NEIGHBOUR_FLIP_CACHE.get(self.key)
         if cached_flips is not None:
+            self._load_cached_subcomplex_actions()
             self._load_cached_transition_cache()
             self._load_cached_neighbour_cache()
             return list(cached_flips)
@@ -204,9 +311,24 @@ class CYTriangulationState(TriangulationState):
         seen_signatures = set()
         subcomplex_to_transition: Dict[Tuple[int, ...], CYTransitionOutput] = {}
         subcomplex_to_neighbour: Dict[Tuple[int, ...], CYToolsTriangulation] = {}
+        subcomplex_to_flips: Dict[
+            Tuple[int, ...],
+            Tuple[FrozenSet[Tuple[int, ...]], FrozenSet[Tuple[int, ...]]],
+        ] = {}
+        subcomplex_actions: List[Tuple[int, ...]] = []
+        seen_subcomplexes: set[Tuple[int, ...]] = set()
         ambiguous_subcomplexes: set[Tuple[int, ...]] = set()
 
         for neighbour in self.find_neightbours():
+            if self.neighbor_mode == "two_neighbors" and not (
+                _safe_bool_method_call(neighbour, "is_fine")
+                and _safe_bool_method_call(neighbour, "is_star")
+                and _safe_bool_method_call(neighbour, "is_regular")
+            ):
+                raise RuntimeError(
+                    "CYTools two_neighbors contract violation: destination "
+                    "representative is not fine, star, and regular."
+                )
             neighbour_simplices = _normalize_simplices(neighbour.simplices())
             flip_from = self.simplices - neighbour_simplices
             flip_to = neighbour_simplices - self.simplices
@@ -221,20 +343,43 @@ class CYTriangulationState(TriangulationState):
             seen_signatures.add(signature)
             flips.append((flip_from, flip_to))
 
-            subcomplex = self._changed_vertices_from_flips(flip_from, flip_to)
+            if self.neighbor_mode == "two_neighbors":
+                subcomplex = _two_neighbor_circuit(self.cy_triangulation, neighbour)
+            else:
+                subcomplex = self._changed_vertices_from_flips(flip_from, flip_to)
+            if subcomplex not in seen_subcomplexes:
+                seen_subcomplexes.add(subcomplex)
+                subcomplex_actions.append(subcomplex)
             if subcomplex in subcomplex_to_transition:
                 subcomplex_to_transition.pop(subcomplex, None)
                 subcomplex_to_neighbour.pop(subcomplex, None)
+                subcomplex_to_flips.pop(subcomplex, None)
                 ambiguous_subcomplexes.add(subcomplex)
             elif subcomplex not in ambiguous_subcomplexes:
                 next_edges = _edges_from_simplices(neighbour_simplices)
-                next_key = simplices_key(self.point_config_index, neighbour_simplices)
+                next_key = _state_key_for_neighbor_mode(
+                    self.point_config_index,
+                    neighbour_simplices,
+                    self.neighbor_mode,
+                )
                 subcomplex_to_transition[subcomplex] = (
                     neighbour_simplices,
                     next_edges,
                     next_key,
                 )
                 subcomplex_to_neighbour[subcomplex] = neighbour
+                subcomplex_to_flips[subcomplex] = (flip_from, flip_to)
+
+        if self.neighbor_mode == "two_neighbors":
+            self.available_subcomplex_actions = tuple(subcomplex_actions)
+            self.subcomplex_to_flips = dict(subcomplex_to_flips)
+            self.ambiguous_subcomplex_actions = frozenset(ambiguous_subcomplexes)
+            self.subcomplex_actions_ready = True
+            self._SHARED_SUBCOMPLEX_CACHE[self.key] = (
+                self.available_subcomplex_actions,
+                dict(self.subcomplex_to_flips),
+                self.ambiguous_subcomplex_actions,
+            )
 
         self._SHARED_NEIGHBOUR_FLIP_CACHE[self.key] = tuple(flips)
         self._SHARED_SUBCOMPLEX_TRANSITION_CACHE[self.key] = dict(subcomplex_to_transition)
@@ -369,7 +514,11 @@ class CYTriangulationState(TriangulationState):
     ) -> Tuple[FrozenSet[Tuple[int, ...]], FrozenSet[Tuple[int, ...]], str]:
         new_simplices = (self.simplices - flip_from).union(flip_to)
         new_edges = _edges_from_simplices(new_simplices)
-        new_key = simplices_key(self.point_config_index, new_simplices)
+        new_key = _state_key_for_neighbor_mode(
+            self.point_config_index,
+            new_simplices,
+            self.neighbor_mode,
+        )
         return new_simplices, new_edges, new_key
 
     def find_changed_subcomplex(self, other: Self) -> FrozenSet[int]:
@@ -398,6 +547,7 @@ def create_state_from_cy_triangulation(
     triangulation: CYToolsTriangulation,
     point_config_index: Optional[int] = None,
     add_origin: bool = True,
+    neighbor_mode: str = "regular",
 ) -> CYTriangulationState:
     simplices = _normalize_simplices(triangulation.simplices())
     edges = _edges_from_simplices(simplices)
@@ -414,4 +564,5 @@ def create_state_from_cy_triangulation(
         edges=edges,
         point_config_index=point_config_index,
         cy_triangulation=triangulation,
+        neighbor_mode=neighbor_mode,
     )

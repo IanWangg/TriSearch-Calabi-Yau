@@ -18,7 +18,10 @@ try:
 except ModuleNotFoundError:
     Polytope = None
 
-from mdp.cy_triangulation_state import CYTriangulationState
+from mdp.cy_triangulation_state import (
+    CYTriangulationState,
+    _normalize_neighbor_mode,
+)
 
 from mdp.cy_graph import (  # noqa: F401
     CanonicalAction,
@@ -249,10 +252,18 @@ def build_cy_rollout_collection(
     rows: Sequence[dict],
     *,
     include_points_interior_to_facets: bool,
+    neighbor_mode: str = "regular",
 ) -> CYRolloutCollection:
     if Polytope is None:
         raise ModuleNotFoundError(
             "cytools is required for CY rollout. Activate the 'sage' environment."
+        )
+
+    resolved_neighbor_mode = _normalize_neighbor_mode(neighbor_mode)
+    if resolved_neighbor_mode == "two_neighbors" and include_points_interior_to_facets:
+        raise ValueError(
+            "neighbor_mode='two_neighbors' requires "
+            "include_points_interior_to_facets=False."
         )
 
     base_states: Dict[str, CYTriangulationState] = {}
@@ -280,10 +291,20 @@ def build_cy_rollout_collection(
                 point_config_index=polytope_index,
                 simplices=frst_simplices,
                 cy_triangulation=frst_tri,
-                is_frst=True,
+                is_frst=True if resolved_neighbor_mode == "regular" else None,
+                neighbor_mode=resolved_neighbor_mode,
             )
+            if resolved_neighbor_mode == "two_neighbors" and not frst_state.is_frst:
+                raise ValueError(
+                    "two_neighbors initial-state validation failed: dataset FRST entry "
+                    f"for polytope {polytope_index} is not fine, star, and regular."
+                )
             base_states.setdefault(frst_state.key, frst_state)
+            if resolved_neighbor_mode == "two_neighbors":
+                initial_states_by_key.setdefault(frst_state.key, frst_state)
 
+        if resolved_neighbor_mode == "two_neighbors":
+            continue
         for tri_simplices in _iter_row_initial_simplices(row):
             tri = polytope.triangulate(
                 simplices=[list(simplex) for simplex in tri_simplices],
@@ -295,12 +316,15 @@ def build_cy_rollout_collection(
                 point_config_index=polytope_index,
                 simplices=tri_simplices,
                 cy_triangulation=tri,
+                neighbor_mode=resolved_neighbor_mode,
             )
             cached_state = base_states.setdefault(state.key, state)
             initial_states_by_key.setdefault(cached_state.key, cached_state)
 
     initial_states = list(initial_states_by_key.values())
     if not initial_states:
+        if resolved_neighbor_mode == "two_neighbors":
+            raise ValueError("No validated FRST initial states were found in the dataset.")
         raise ValueError("No non-fine initial states were found in the dataset.")
 
     return CYRolloutCollection(
@@ -377,6 +401,7 @@ class CYRandomRolloutEngine:
         state_factory: Optional[Callable[[int, CanonicalSimplices], Any]] = None,
         is_target_state_fn: Optional[Callable[[Any], bool]] = None,
         reward_function: Optional[Callable[[Any, Any], float]] = None,
+        neighbor_mode: str = "regular",
     ):
         if collection is not None:
             base_states = collection.base_states
@@ -384,6 +409,12 @@ class CYRandomRolloutEngine:
             polytope_by_index = collection.polytope_by_index
             vertices_by_polytope = collection.vertices_by_polytope
 
+        self.neighbor_mode = _normalize_neighbor_mode(neighbor_mode)
+        if self.neighbor_mode == "two_neighbors" and include_points_interior_to_facets:
+            raise ValueError(
+                "neighbor_mode='two_neighbors' requires "
+                "include_points_interior_to_facets=False."
+            )
         self.base_states = dict(base_states or {})
         self.initial_states = list(initial_states or [])
         self.polytope_by_index = dict(polytope_by_index or {})
@@ -422,6 +453,7 @@ class CYRandomRolloutEngine:
             point_config_index=point_config_index,
             simplices=simplices,
             cy_triangulation=triangulation,
+            neighbor_mode=self.neighbor_mode,
         )
 
     def _register_node(self, *, key: str, point_config_index: int, simplices: CanonicalSimplices) -> Tuple[CYGraphNode, bool]:

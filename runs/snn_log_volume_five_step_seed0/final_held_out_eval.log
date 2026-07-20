@@ -1,0 +1,20 @@
+Mosek was successfully activated.
+
+Using triangulation objective: reward=max_cy_volume goal=max cy_volume_reward_transform=log
+Using evaluation device: cuda:0
+Loading CY dataset from data/cy/two_neighbors_h11_12.samples.jsonl
+Dataset split: train_polytopes=8 eval_polytopes=4 coord_dim=4 preprocessing=none train_mean_vertices=16.88 eval_mean_vertices=17.25
+Using eval polytopes selected by --num_eval_polytopes=4: [28, 22, 23, 26]
+Built CY eval collection: eval_initial_states=4 time=0.07s
+Using policy in_channels=4
+Using subcomplex_actor_type=snn_simplex
+Loaded checkpoint: ckpt/runs/snn_log_volume_five_step_seed0/checkpoints/final.pth
+Eval initial state filter: actionable=4/4 time=3.78s
+Evaluating on 4 eval initial states.
+/home/yiranwang/combinartorics/TriSearch-Calabi-Yau/scripts/../core/snn_simplex_topology.py:113: UserWarning: Sparse CSR tensor support is in beta state. If you miss a functionality in the sparse tensor support, please submit a feature request to https://github.com/pytorch/pytorch/issues. (Triggered internally at /opt/conda/conda-bld/pytorch_1724789145202/work/aten/src/ATen/SparseCsrTensorImpl.cpp:53.)
+  laplacian = torch.sparse.mm(boundary.transpose(0, 1), boundary).coalesce()
+Eval: return=0.0213 return_std=0.8286 return_min=-1.2522 return_max=1.0153 discounted_reward=0.0777 success_rate=0.0000 finished_fraction=0.0000 finished_count=0 mean_candidates=11.7500 valid_action_fraction=1.0000 frt_hits=0 collapsed_hits=0 dead_end_hits=0 all_step_resets=0 expanded_states=12 discovered_states=87 objective_initial_mean=975.7205 objective_final_mean=1054.5527 objective_best_mean=1630.1615 objective_mean_improvement=654.4410 objective_improved_fraction=0.7500
+Rollout length: mean=5.00 min=5 max=5
+Objective: name=max_cy_volume goal=max initial_mean=975.7205 final_mean=1054.5527 best_mean=1630.1615 mean_improvement=654.4410
+System: graph_nodes=141 runtime_graph_nodes=137 graph_edges=187 cached_states=16 hot_cache=12 shared_subcomplex=16 shared_neighbour_flip=16 shared_subcomplex_transition=16 shared_subcomplex_neighbour=16 eval_sec=13.22
+Saved summary to runs/snn_log_volume_five_step_seed0/final_held_out_eval.json

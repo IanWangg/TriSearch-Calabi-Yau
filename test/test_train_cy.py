@@ -1,3 +1,5 @@
+import io
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -7,6 +9,7 @@ import pytest
 
 import core.train_cy as train_cy
 from core.train_cy import (
+    build_iteration_metrics_record,
     build_training_variant_suffix,
     build_wandb_run_name,
     configure_torch_cpu_threads,
@@ -14,7 +17,9 @@ from core.train_cy import (
     parse_args,
     validate_count_bonus_args,
     validate_similarity_aug_args,
+    write_iteration_metrics_record,
 )
+from core.training_types import PPOTrainStats, PolicyRolloutSummary
 
 
 def test_parse_args_accepts_circuit_pool_actor_type():
@@ -97,6 +102,137 @@ def test_parse_args_accepts_name_suffix():
     args = parse_args(["--name_suffix", "torch1_workers16"])
 
     assert args.name_suffix == "torch1_workers16"
+
+
+def _volume_rollout_summary(*, offset=0.0):
+    initial_values = [float(index + 1) + offset for index in range(32)]
+    best_values = [
+        value + (2.0 if index % 2 == 0 else 0.0)
+        for index, value in enumerate(initial_values)
+    ]
+    final_values = [value + 1.0 for value in initial_values]
+    return PolicyRolloutSummary(
+        final_states=[],
+        rollout_buffer=None,
+        success_rate=0.0,
+        discounted_reward=0.25,
+        finished_fraction=0.0,
+        finished_count=0,
+        frt_hits=0,
+        collapsed_hits=0,
+        dead_end_hits=0,
+        all_step_reset_count=0,
+        all_step_frt_hits=0,
+        all_step_collapsed_hits=0,
+        all_step_dead_end_hits=0,
+        expanded_states=1,
+        discovered_states=1,
+        multiprocessing_steps=0,
+        total_candidates=32,
+        total_valid_actions=32,
+        candidate_expand_sec=0.1,
+        policy_data_build_sec=0.1,
+        policy_batch_transfer_sec=0.1,
+        policy_value_inference_sec=0.1,
+        policy_action_inference_sec=0.1,
+        transition_apply_sec=0.1,
+        objective_name="max_cy_volume",
+        objective_goal="max",
+        objective_initial_values=initial_values,
+        objective_final_values=final_values,
+        objective_best_values=best_values,
+        return_mean=0.5,
+        return_std=0.2,
+        return_min=-0.1,
+        return_max=0.9,
+        training_return_mean=0.5,
+        training_discounted_reward=0.25,
+    )
+
+
+def test_iteration_metrics_schema_records_all_volume_slots_and_aggregates():
+    train_summary = _volume_rollout_summary()
+    eval_summary = _volume_rollout_summary(offset=100.0)
+    train_stats = PPOTrainStats(
+        total_loss=1.0,
+        policy_loss=2.0,
+        value_loss=3.0,
+        entropy_loss=4.0,
+        explained_variance=5.0,
+        clip_ratio=6.0,
+        num_samples=160,
+        num_valid_action_samples=150,
+    )
+
+    record = build_iteration_metrics_record(
+        iteration=0,
+        reward_function="max_cy_volume",
+        cy_volume_reward_transform="log",
+        rollout_summary=train_summary,
+        eval_summary=eval_summary,
+        train_stats=train_stats,
+        deterministic_rollout=False,
+        deterministic_eval=True,
+        rollout_sec=1.0,
+        bootstrap_sec=2.0,
+        prepare_sec=3.0,
+        train_sec=4.0,
+        eval_sec=5.0,
+        iteration_sec=15.0,
+    )
+
+    assert record["schema_version"] == 1
+    assert record["iteration"] == 1
+    assert record["cy_volume_reward_transform"] == "log"
+    assert record["train"]["deterministic"] is False
+    assert record["eval"]["deterministic"] is True
+    assert record["train"]["return"] == {
+        "mean": 0.5,
+        "std": 0.2,
+        "min": -0.1,
+        "max": 0.9,
+        "discounted_mean": 0.25,
+        "training_mean": 0.5,
+        "training_discounted_mean": 0.25,
+    }
+    train_volume = record["train"]["raw_volume"]
+    eval_volume = record["eval"]["raw_volume"]
+    assert len(train_volume["slots"]) == 32
+    assert len(eval_volume["slots"]) == 32
+    assert train_volume["slots"][0] == {
+        "slot": 0,
+        "initial_volume": 1.0,
+        "final_volume": 2.0,
+        "best_volume": 3.0,
+        "best_volume_improvement": 2.0,
+    }
+    assert train_volume["initial_mean"] == 16.5
+    assert train_volume["final_mean"] == 17.5
+    assert train_volume["best_mean"] == 17.5
+    assert train_volume["mean_best_volume_improvement"] == 1.0
+    assert train_volume["improved_fraction"] == 0.5
+    assert record["ppo"]["policy_loss"] == 2.0
+    assert record["timing"]["iteration_sec"] == 15.0
+
+
+class _FlushTrackingStream(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self.flush_count = 0
+
+    def flush(self):
+        self.flush_count += 1
+        super().flush()
+
+
+def test_iteration_metrics_writer_emits_one_jsonl_record_and_flushes():
+    stream = _FlushTrackingStream()
+
+    write_iteration_metrics_record(stream, {"iteration": 1, "value": 2.0})
+
+    assert stream.flush_count == 1
+    assert json.loads(stream.getvalue()) == {"iteration": 1, "value": 2.0}
+    assert stream.getvalue().endswith("\n")
 
 
 def test_name_suffix_is_appended_to_checkpoint_dir(monkeypatch):

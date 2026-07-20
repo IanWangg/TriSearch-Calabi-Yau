@@ -198,9 +198,24 @@ class SNNSimplexActor(nn.Module):
             simplex_vertices[:, None, :, None]
             == candidate_vertices[None, :, None, :]
         ).any(dim=-1).all(dim=-1).transpose(0, 1)
+        missing_candidates = ~contains.any(dim=1)
+        if bool(missing_candidates.any().item()):
+            valid_candidate_vertices = candidate_vertices >= 0
+            candidate_sizes = valid_candidate_vertices.sum(dim=1)
+            lower_dimensional = candidate_sizes < simplex_vertices.size(1)
+            fallback_candidates = missing_candidates & lower_dimensional
+            if bool(fallback_candidates.any().item()):
+                overlap_counts = (
+                    simplex_vertices[:, None, :, None]
+                    == candidate_vertices[None, :, None, :]
+                ).any(dim=-1).sum(dim=-1).transpose(0, 1)
+                required_overlap = (candidate_sizes - 1).clamp_min(1)
+                fallback_contains = overlap_counts >= required_overlap.unsqueeze(1)
+                contains[fallback_candidates] = fallback_contains[fallback_candidates]
         if bool((~contains.any(dim=1)).any().item()):
             raise ValueError(
-                "At least one candidate subcomplex contains no current top-dimensional simplex."
+                "At least one candidate subcomplex has no incident current "
+                "top-dimensional simplex."
             )
 
         pooled_inputs = simplex_embeddings.unsqueeze(0).expand(candidate_vertices.size(0), -1, -1)

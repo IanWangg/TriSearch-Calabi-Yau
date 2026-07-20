@@ -160,16 +160,33 @@ def _build_candidate_simplex_memberships(
 
     candidate_ids = []
     simplex_ids = []
+    simplex_rows = simplex_vertices.tolist()
     for candidate_id, candidate_vertices in enumerate(subcomplex_vertices.tolist()):
         candidate_vertex_set = {int(vertex) for vertex in candidate_vertices if int(vertex) >= 0}
-        for simplex_id, simplex in enumerate(simplex_vertices.tolist()):
+        candidate_simplex_ids = []
+        for simplex_id, simplex in enumerate(simplex_rows):
             if all(int(vertex) in candidate_vertex_set for vertex in simplex):
-                candidate_ids.append(candidate_id)
-                simplex_ids.append(simplex_id)
-        if not candidate_ids or candidate_ids[-1] != candidate_id:
+                candidate_simplex_ids.append(simplex_id)
+
+        # A two-neighbor circuit is lower-dimensional than an ambient FRST
+        # simplex. In that case, pool the current top-simplex cofaces of the
+        # circuit's source faces (all but one of the circuit vertices).
+        if not candidate_simplex_ids and len(candidate_vertex_set) < simplex_vertices.size(1):
+            required_overlap = max(1, len(candidate_vertex_set) - 1)
+            candidate_simplex_ids = [
+                simplex_id
+                for simplex_id, simplex in enumerate(simplex_rows)
+                if len(candidate_vertex_set.intersection(int(vertex) for vertex in simplex))
+                >= required_overlap
+            ]
+
+        if not candidate_simplex_ids:
             raise ValueError(
-                "At least one candidate subcomplex contains no current top-dimensional simplex."
+                "At least one candidate subcomplex has no incident current "
+                "top-dimensional simplex."
             )
+        candidate_ids.extend([candidate_id] * len(candidate_simplex_ids))
+        simplex_ids.extend(candidate_simplex_ids)
 
     return (
         torch.tensor(candidate_ids, dtype=torch.long, device="cpu"),

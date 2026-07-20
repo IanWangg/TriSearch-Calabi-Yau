@@ -1,0 +1,89 @@
+{
+  "all_step_collapsed_hits": 0,
+  "all_step_dead_end_hits": 0,
+  "all_step_frt_hits": 0,
+  "all_step_resets": 0,
+  "cached_states": 16,
+  "candidate_expand_sec": 0.001238517987076193,
+  "checkpoint_path": "ckpt/runs/snn_log_volume_five_step_seed0/checkpoints/final.pth",
+  "collapsed_hits": 0,
+  "dead_end_hits": 0,
+  "device": "cuda:0",
+  "discounted_reward": 0.07768719577040809,
+  "discovered_states": 87,
+  "eval_initial_states": 4,
+  "eval_mean_vertices": 17.25,
+  "eval_polytope_indices": [
+    28,
+    22,
+    23,
+    26
+  ],
+  "eval_polytopes": 4,
+  "eval_sec": 13.224049863987602,
+  "eval_steps": 5,
+  "expanded_states": 12,
+  "finished_count": 0,
+  "finished_fraction": 0.0,
+  "frt_hits": 0,
+  "graph_edge_count": 187,
+  "graph_node_count": 141,
+  "hot_cache_size": 12,
+  "multiprocessing_steps": 0,
+  "objective": {
+    "best_mean": 1630.1614583333312,
+    "best_values": [
+      1820.333333333323,
+      1249.3333333333328,
+      1604.9791666666652,
+      1846.0000000000034
+    ],
+    "final_mean": 1054.5526866628502,
+    "final_values": [
+      1714.6666666666486,
+      314.7940799847599,
+      342.7499999999995,
+      1845.9999999999925
+    ],
+    "goal": "max",
+    "improved_fraction": 0.75,
+    "initial_mean": 975.7205040556513,
+    "initial_values": [
+      1820.333333333323,
+      214.83333333333317,
+      1198.9374999999984,
+      668.7778495559505
+    ],
+    "mean_improvement": 654.4409542776798,
+    "name": "max_cy_volume"
+  },
+  "policy_action_inference_sec": 0.3266407590126619,
+  "policy_batch_transfer_sec": 0.0019544099923223257,
+  "policy_data_build_sec": 0.04953455799841322,
+  "policy_mode": "policy",
+  "policy_value_inference_sec": 0.0,
+  "preprocessing": "none",
+  "return_max": 1.015324473523859,
+  "return_mean": 0.021347501462761542,
+  "return_min": -1.2521897084541331,
+  "return_std": 0.8286409149310068,
+  "rollout_length_max": 5,
+  "rollout_length_mean": 5.0,
+  "rollout_length_min": 5,
+  "rollout_lengths": [
+    5,
+    5,
+    5,
+    5
+  ],
+  "shared_cache_sizes": {
+    "neighbour_flip": 16,
+    "subcomplex": 16,
+    "subcomplex_neighbour": 16,
+    "subcomplex_transition": 16
+  },
+  "success_rate": 0.0,
+  "total_candidates": 235,
+  "total_valid_actions": 20,
+  "transition_apply_sec": 10.57505303202197
+}

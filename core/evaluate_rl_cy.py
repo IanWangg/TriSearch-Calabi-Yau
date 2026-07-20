@@ -29,7 +29,12 @@ from core.cy_policy_rollout_utils import (
     rollout_return_statistics,
 )
 from core.cy_data_utils import mean_vertex_count, split_rows_by_vertex_count
-from core.train_cy import maybe_filter_initial_state_pool, normalize_subcomplex_actor_type
+from core.train_cy import (
+    maybe_filter_initial_state_pool,
+    normalize_subcomplex_actor_type,
+    validate_cy_volume_reward_transform_args,
+    validate_neighbor_mode_args,
+)
 from core.cy_runtime_utils import resolve_training_device, set_seeds
 from core.vertex_preprocessing import (
     SUPPORTED_PREPROCESSING,
@@ -46,11 +51,13 @@ from mdp.cy_rollout import (
     maybe_compact_rollout_memory,
 )
 from reward_functions import (
+    CY_VOLUME_REWARD_TRANSFORMS,
     SUPPORTED_REWARDS,
     get_objective,
     get_reward,
     infer_goal,
 )
+from mdp.cy_triangulation_state import NEIGHBOR_MODES
 
 if TYPE_CHECKING:
     from models.egnn_subcomplex_predictor import EGNNSubcomplexAgent
@@ -114,12 +121,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Forwarded to cytools Polytope.triangulate(...).",
     )
     parser.add_argument(
+        "--neighbor_mode",
+        type=str,
+        choices=NEIGHBOR_MODES,
+        default="regular",
+        help="Use ordinary regular neighbors or CYTools FRST two-neighbors.",
+    )
+    parser.add_argument(
         "--reward_function",
         "--reward",
         dest="reward_function",
         choices=SUPPORTED_REWARDS,
         default=None,
         help="Optional triangulation objective. Omit to evaluate CY sampling.",
+    )
+    parser.add_argument(
+        "--cy_volume_reward_transform",
+        type=str,
+        choices=CY_VOLUME_REWARD_TRANSFORMS,
+        default="raw",
+        help=(
+            "Transform for max_cy_volume transition rewards. Raw CY volumes are "
+            "still reported in the objective summary."
+        ),
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument(
@@ -869,11 +893,20 @@ def build_summary_payload(
 
 def main(args: argparse.Namespace) -> None:
     set_seeds(args.seed)
+    validate_neighbor_mode_args(args)
+    validate_cy_volume_reward_transform_args(args)
     reward_function = (
-        get_reward(args.reward_function) if args.reward_function is not None else None
+        get_reward(
+            args.reward_function,
+            cy_volume_reward_transform=args.cy_volume_reward_transform,
+        )
+        if args.reward_function is not None
+        else None
     )
     objective_function = (
-        get_objective(args.reward_function) if args.reward_function is not None else None
+        get_objective(args.reward_function, reward=reward_function)
+        if args.reward_function is not None
+        else None
     )
     objective_goal = (
         infer_goal(args.reward_function) if args.reward_function is not None else None
@@ -883,7 +916,8 @@ def main(args: argparse.Namespace) -> None:
     else:
         print(
             f"Using triangulation objective: reward={args.reward_function} "
-            f"goal={objective_goal}"
+            f"goal={objective_goal} "
+            f"cy_volume_reward_transform={args.cy_volume_reward_transform}"
         )
     resolved_preprocessing = normalize_preprocessing_mode(args.preprocessing)
     vertex_preprocessor = resolve_eval_vertex_preprocessor(
@@ -941,6 +975,7 @@ def main(args: argparse.Namespace) -> None:
     eval_collection = build_cy_rollout_collection(
         split.eval_rows,
         include_points_interior_to_facets=args.include_points_interior_to_facets,
+        neighbor_mode=args.neighbor_mode,
     )
     build_sec = time.perf_counter() - build_start
     print(
@@ -955,6 +990,7 @@ def main(args: argparse.Namespace) -> None:
         state_cache_mode=args.state_cache_mode,
         max_hot_states=args.max_hot_states,
         reward_function=reward_function,
+        neighbor_mode=args.neighbor_mode,
     )
     policy = None
     if not args.random:
