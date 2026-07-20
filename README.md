@@ -230,14 +230,145 @@ Random rollout sampling:
 python tools/rollout_cy_random.py --dataset_path data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl --dry_run
 ```
 
-Dataset generation entrypoints:
+## 4D Data Generation
+
+Run every command in this section from the repository root after activating
+the project environment. Four-dimensional reflexive polytopes produce
+Calabi-Yau threefolds, which are the inputs required by `max_cy_volume`.
 
 ```bash
-python data/cy/generate_dataset.py --help
+conda activate trisearch_calabi_yau
+export MOSEKLM_LICENSE_FILE=/path/to/mosek.lic
+export CYTOOLS_REGULARITY_BACKEND=mosek
+```
+
+The Mosek Python package and the license are separate: every machine must have
+its own valid license. CYTools fetching also requires network access. Use
+`--help` to see every generator option:
+
+```bash
 python data/cy/generate_4d_dataset.py --help
 python data/cy/generate_eval_dataset.py --help
-python data/cy/generate_k3_eval_dataset.py --help
 ```
+
+### Generate an FRST dataset for volume optimization
+
+`generate_4d_dataset.py` fetches 4D N-lattice reflexive polytopes with
+`cytools.fetch_polytopes`, generates FRST seeds, and optionally collects nearby
+non-fine regular triangulations. The following small seeded run requests
+favorable polytopes with `h11=12` and uses the point configuration required by
+CYTools two-neighbor navigation:
+
+```bash
+python data/cy/generate_4d_dataset.py \
+  --num-polytopes 12 \
+  --h11 12 \
+  --favorable \
+  --frsts-per-polytope 1 \
+  --num-triangulations-per-frst 1 \
+  --no-include-points-interior-to-facets \
+  --bfs-max-depth 2 \
+  --bfs-max-nodes 100 \
+  --num-workers 4 \
+  --seed 0 \
+  --compact-output \
+  --output-dir data/cy/output4d_volume \
+  --output-name cy4d_h11_12_frst
+```
+
+The requested counts are upper bounds. CYTools may return fewer polytopes,
+FRSTs, or nearby triangulations, and the final console summary reports the
+actual counts. `--compact-output` keeps the main training artifact only:
+
+```text
+data/cy/output4d_volume/cy4d_h11_12_frst.samples.jsonl
+```
+
+The same directory also contains
+`cy4d_h11_12_frst.checkpoint.json`. If generation is interrupted, rerun the
+same command with `--resume`; completed polytope rows will not be regenerated.
+Without `--compact-output`, the generator additionally writes a larger
+`cy4d_h11_12_frst.json` file containing dataset metadata.
+
+By default, nearby non-fine states are collected with bounded BFS. Pass
+`--collection-depths 1 2` to retain only selected depths, or `--random-flip`
+to replace BFS collection with regular random flips. Two-neighbor volume
+training starts from the generated `frst_list`, so the
+`--no-include-points-interior-to-facets` flag is the important compatibility
+requirement for that workflow.
+
+To smoke-test volume optimization on the generated file:
+
+```bash
+python scripts/train_cy.py \
+  --dataset_path data/cy/output4d_volume/cy4d_h11_12_frst.samples.jsonl \
+  --neighbor_mode two_neighbors \
+  --no-include_points_interior_to_facets \
+  --reward max_cy_volume \
+  --cy_volume_reward_transform log \
+  --max_rows 2 \
+  --num_eval_polytopes 1 \
+  --force_cpu \
+  --checkpoint_path /tmp/trisearch_cy_volume_smoke \
+  --dry_run
+```
+
+After this succeeds, remove `--dry_run` and choose the production rollout,
+evaluation, and checkpoint settings described in the earlier FRST-only volume
+optimization section.
+
+### Reuse a fixed 4D polytope set
+
+For an exactly shared set of polytopes, pass a JSON or JSONL file instead of
+fetching again. Each record must contain `vertices`, `n_points`, or
+`n_vertices`; `polytope_index`, `h11`, `favorable`, and
+`requested_num_vertices` are optional. A previously generated
+`.samples.jsonl` file can also be reused directly because it contains
+`vertices`:
+
+```bash
+python data/cy/generate_4d_dataset.py \
+  --polytope-file data/cy/fixed_4d_polytopes.jsonl \
+  --num-polytopes 12 \
+  --frsts-per-polytope 1 \
+  --num-triangulations-per-frst 1 \
+  --no-include-points-interior-to-facets \
+  --num-workers 4 \
+  --seed 0 \
+  --compact-output \
+  --output-dir data/cy/output4d_fixed \
+  --output-name cy4d_fixed_frst
+```
+
+When `--polytope-file` is supplied, `--num-polytopes` is only an optional cap;
+the fetch filters such as `--h11`, `--num-vertices`, and `--favorable` are not
+used.
+
+### Generate ordinary 4D evaluation states
+
+`generate_eval_dataset.py` fetches 4D polytopes, samples random heights, and
+keeps unique non-fine regular triangulations. This is useful for evaluating
+ordinary `neighbor_mode=regular` policies; it does not generate the FRST seed
+dataset used by two-neighbor volume optimization.
+
+```bash
+python data/cy/generate_eval_dataset.py \
+  --num-polytopes 4 \
+  --h11 12 \
+  --favorable \
+  --num-triangulations 8 \
+  --max-tries 100 \
+  --num-workers 4 \
+  --seed 1 \
+  --compact-output \
+  --output-dir data/cy/output4d_eval \
+  --output-name cy4d_h11_12_eval
+```
+
+Generated `data/cy/output*` directories are ignored by Git because the files
+can become large. To give a generated dataset to a collaborator, explicitly
+publish or transfer the resulting `.samples.jsonl` file; pushing the code
+alone will not include newly generated output.
 
 ## Tests
 
