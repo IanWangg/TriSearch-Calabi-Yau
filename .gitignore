@@ -20,6 +20,6 @@ data/cy/output*/
 !data/cy/output4d/cy4d_random_flip_100_3_random_flip.samples.jsonl
 
 # New training checkpoints are generated artifacts. The curated checkpoint directory is intentionally retained.
-ckpt/*
+ckpt/runs/
 !ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/
 !ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/*.pth
