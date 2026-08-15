@@ -1109,6 +1109,8 @@ def _serialize_fetched_n_polytope(
         entry["h11"] = int(polytope_spec["h11"])
     if "favorable" in polytope_spec:
         entry["favorable"] = bool(polytope_spec["favorable"])
+    if polytope_spec.get("source_metadata") is not None:
+        entry["source_metadata"] = dict(polytope_spec["source_metadata"])
     return entry
 
 
@@ -2254,6 +2256,8 @@ def generate_and_save_cy_4d_reflexive_dataset_incremental(
     resume: bool = False,
     checkpoint_path: Optional[str] = None,
     log_every: int = 10,
+    polytope_specs: Optional[Sequence[Dict[str, Any]]] = None,
+    polytope_source_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if num_triangulations_per_frst is None and triangulations_per_polytope is None:
         raise ValueError(
@@ -2296,7 +2300,29 @@ def generate_and_save_cy_4d_reflexive_dataset_incremental(
         else:
             effective_bfs_max_depth = max(resolved_bfs_max_depth, max(normalized_collection_depths))
 
-    if polytope_file is None:
+    if polytope_file is not None and polytope_specs is not None:
+        raise ValueError("polytope_file and polytope_specs are mutually exclusive.")
+
+    if polytope_specs is not None:
+        if num_polytopes is not None and int(num_polytopes) <= 0:
+            raise ValueError("num_polytopes must be positive when provided.")
+        resolved_polytope_specs = [dict(spec) for spec in polytope_specs]
+        if num_polytopes is not None:
+            resolved_polytope_specs = resolved_polytope_specs[: int(num_polytopes)]
+        if not resolved_polytope_specs:
+            raise ValueError("polytope_specs must contain at least one polytope.")
+        for spec_index, spec in enumerate(resolved_polytope_specs):
+            spec.setdefault("polytope_index", int(spec_index))
+            spec["vertices"] = _extract_polytope_points_from_record(spec)
+            spec.setdefault("polytope_source", "provided_polytope_specs")
+        polytope_specs = resolved_polytope_specs
+        resolved_polytope_source = str(
+            (polytope_source_metadata or {}).get(
+                "polytope_source",
+                "provided_polytope_specs",
+            )
+        )
+    elif polytope_file is None:
         if num_polytopes is None or int(num_polytopes) <= 0:
             raise ValueError("num_polytopes must be positive when polytope_file is not provided.")
         if h11 is None:
@@ -2307,11 +2333,13 @@ def generate_and_save_cy_4d_reflexive_dataset_incremental(
             num_vertices=num_vertices,
             favorable=favorable,
         )
+        resolved_polytope_source = "cytools.fetch_polytopes"
     else:
         polytope_specs = _load_4d_n_lattice_polytope_specs_from_file(
             polytope_file=polytope_file,
             num_polytopes=None if num_polytopes is None else int(num_polytopes),
         )
+        resolved_polytope_source = "polytope_file"
     actual_num_polytopes = int(len(polytope_specs))
     resolved_num_workers = _resolve_num_workers(
         num_workers,
@@ -2383,9 +2411,7 @@ def generate_and_save_cy_4d_reflexive_dataset_incremental(
     metadata.update(
         {
             "dataset_dimension": 4,
-            "polytope_source": "cytools.fetch_polytopes"
-            if polytope_file is None
-            else "polytope_file",
+            "polytope_source": resolved_polytope_source,
             "polytope_file": None if polytope_file is None else str(Path(polytope_file).expanduser()),
             "requested_num_polytopes": actual_num_polytopes
             if num_polytopes is None
@@ -2395,6 +2421,8 @@ def generate_and_save_cy_4d_reflexive_dataset_incremental(
             "favorable": None if favorable is None else bool(favorable),
         }
     )
+    if polytope_source_metadata is not None:
+        metadata["polytope_source_metadata"] = dict(polytope_source_metadata)
 
     return _run_incremental_collection_jobs(
         jobs=jobs,

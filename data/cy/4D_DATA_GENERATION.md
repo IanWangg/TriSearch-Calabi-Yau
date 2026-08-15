@@ -52,3 +52,50 @@ Your implementation should allow the following options:
 3. number of vertices (can be none)
 4. Favorable (default to False)
 The rest options can follow `generate_dataset.py`.
+
+## Hugging Face source
+
+`generate_4d_dataset_hugging_face.py` has the same generation options and
+output format as `generate_4d_dataset.py`, but reads vertices from
+`calabi-yau-data/polytopes-4d`:
+
+```bash
+conda activate sage
+python data/cy/generate_4d_dataset_hugging_face.py \
+  --num-polytopes 100 \
+  --h11 12 \
+  --num-vertices 8 \
+  --favorable \
+  --num-triangulations-per-frst 10 \
+  --frsts-per-polytope 10 \
+  --random-flip \
+  --fast \
+  --no-include-points-interior-to-facets \
+  --compact-output \
+  --output-dir data/cy/output4d_hugging_face \
+  --output-name cy_4d_h11_12
+```
+
+The source table describes its normal-form vertices with the mirror Hodge
+convention relative to using those vertices directly in the N lattice.
+Consequently, the script filters source `h12` for the requested N-lattice CY
+`h11`, then verifies every selected row with `Polytope.h11(lattice="N")`.
+Favorability is also evaluated with CYTools because it is not a source column.
+Parquet filtering is performed while streaming; the full 15.8 GB dataset is
+not loaded into memory. The resolved Hugging Face revision is saved in the
+checkpoint/full-dataset metadata.
+
+The `.samples.jsonl` output is accepted directly by TriSearch. For toric CY
+volume optimization, generate without facet-interior points as above and use
+the FRST two-neighbor mode:
+
+```bash
+python scripts/train_cy.py \
+  --dataset_path data/cy/output4d_hugging_face/cy_4d_h11_12.samples.jsonl \
+  --reward max_toric_cy_volume \
+  --neighbor_mode two_neighbors \
+  --no-include_points_interior_to_facets
+```
+
+For reproducible long or resumed jobs, pass an immutable commit SHA through
+`--hf-revision`. `--hf-cache-dir` can be used to select a shared local cache.
