@@ -164,6 +164,31 @@ two-face-equivalence state space. CYTools currently labels the two-neighbor and
 non-favorable CY paths as experimental; failures are surfaced directly, with
 no alternate volume formula or toric-cone fallback.
 
+To reproduce the `cyopt` objective instead, use `--reward max_toric_cy_volume`.
+Its reported objective is
+`log10(cy.compute_cy_volume(cy.toric_kahler_cone().tip_of_stretched_cone(c=1)))`,
+and its dense transition reward is the next-state value minus the current-state
+value. This reward deliberately uses the full toric Kähler cone and does not
+accept `--cy_volume_reward_transform log`, because the base-10 logarithm is
+already part of the objective:
+
+```bash
+python scripts/train_cy.py \
+  --dataset_path data/cy/two_neighbors_h11_12.samples.jsonl \
+  --neighbor_mode two_neighbors \
+  --no-include_points_interior_to_facets \
+  --reward max_toric_cy_volume \
+  --num_eval_polytopes 4 \
+  --num_states 32 \
+  --rollout_length 5 \
+  --seed 0 \
+  --force_cpu \
+  --checkpoint_path /tmp/trisearch_max_toric_cy_volume
+```
+
+Unlike `max_cy_volume`, this exact `cyopt` objective can vary between complete
+FRST representatives with the same 2-face restrictions.
+
 ## Training Logs
 
 Training reports one cumulative return summary after each complete rollout:

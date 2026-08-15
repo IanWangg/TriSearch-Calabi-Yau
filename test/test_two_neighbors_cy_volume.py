@@ -165,12 +165,19 @@ class _FakeCY:
     def __init__(self, volume):
         self.volume = float(volume)
         self.volume_calls = 0
+        self.mori_cone_calls = 0
+        self.toric_kahler_cone_calls = 0
 
     def dimension(self):
         return 3
 
     def mori_cone_cap(self, *, in_basis):
         assert in_basis is True
+        self.mori_cone_calls += 1
+        return self
+
+    def toric_kahler_cone(self):
+        self.toric_kahler_cone_calls += 1
         return self
 
     def dual(self):
@@ -266,6 +273,54 @@ def test_max_cy_volume_log_reward_rejects_nonpositive_volumes(
         reward(source, destination)
     assert source_cy.volume_calls == 1
     assert destination_cy.volume_calls == 1
+
+
+def test_max_toric_cy_volume_matches_cyopt_objective_and_is_registered():
+    source_cy = _FakeCY(100.0)
+    destination_cy = _FakeCY(1000.0)
+    source = SimpleNamespace(
+        key="source",
+        cy_triangulation=_FakeCYTriangulation(source_cy),
+    )
+    destination = SimpleNamespace(
+        key="destination",
+        cy_triangulation=_FakeCYTriangulation(destination_cy),
+    )
+    reward = get_reward("max_toric_cy_volume")
+    objective = get_objective("max_toric_cy_volume", reward=reward)
+
+    assert infer_goal("max_toric_cy_volume") == "max"
+    assert objective(source) == pytest.approx(2.0)
+    assert reward(source, destination) == pytest.approx(1.0)
+    assert objective(destination) == pytest.approx(3.0)
+    assert source_cy.toric_kahler_cone_calls == 1
+    assert destination_cy.toric_kahler_cone_calls == 1
+    assert source_cy.mori_cone_calls == 0
+    assert destination_cy.mori_cone_calls == 0
+    assert source_cy.volume_calls == 1
+    assert destination_cy.volume_calls == 1
+
+
+@pytest.mark.parametrize("volume", [0.0, -1.0, math.inf, math.nan])
+def test_max_toric_cy_volume_rejects_nonpositive_or_nonfinite_volume(volume):
+    state = SimpleNamespace(
+        key="invalid",
+        cy_triangulation=_FakeCYTriangulation(_FakeCY(volume)),
+    )
+
+    with pytest.raises(ValueError, match="finite, strictly positive CY volume"):
+        get_objective("max_toric_cy_volume")(state)
+
+
+def test_max_toric_cy_volume_is_available_in_train_and_eval_clis():
+    assert (
+        parse_train_args(["--reward", "max_toric_cy_volume"]).reward_function
+        == "max_toric_cy_volume"
+    )
+    assert (
+        parse_eval_args(["--reward", "max_toric_cy_volume"]).reward_function
+        == "max_toric_cy_volume"
+    )
 
 
 def test_cy_volume_reward_transform_cli_and_validation():
