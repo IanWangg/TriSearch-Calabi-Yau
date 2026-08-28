@@ -13,10 +13,12 @@ from core.train_cy import (
     build_training_variant_suffix,
     build_wandb_run_name,
     configure_torch_cpu_threads,
+    find_latest_policy_checkpoint,
     normalize_subcomplex_actor_type,
     parse_args,
     validate_count_bonus_args,
     validate_similarity_aug_args,
+    value_feature_source_for_subcomplex_actor,
     write_iteration_metrics_record,
 )
 from core.training_types import PPOTrainStats, PolicyRolloutSummary
@@ -33,6 +35,7 @@ def test_parse_args_accepts_snn_simplex_actor_type():
 
     assert args.subcomplex_actor_type == "snn_simplex"
     assert normalize_subcomplex_actor_type("snn_simplex") == "snn_simplex"
+    assert value_feature_source_for_subcomplex_actor("snn_simplex") == "snn_simplex"
 
 
 def test_normalize_subcomplex_actor_type_treats_default_as_gnn():
@@ -49,6 +52,12 @@ def test_training_variant_suffix_includes_non_mlp_actor_type():
     args = parse_args(["--subcomplex_actor_type", "gnn"])
 
     assert build_training_variant_suffix(args) == "_actor_gnn"
+
+
+def test_training_variant_suffix_includes_snn_value_source_for_snn_actor():
+    args = parse_args(["--subcomplex_actor_type", "snn_simplex"])
+
+    assert build_training_variant_suffix(args) == "_actor_snn_simplex_value_snn_simplex"
 
 
 def test_training_variant_suffix_omits_mlp_actor_alias():
@@ -233,6 +242,37 @@ def test_iteration_metrics_writer_emits_one_jsonl_record_and_flushes():
     assert stream.flush_count == 1
     assert json.loads(stream.getvalue()) == {"iteration": 1, "value": 2.0}
     assert stream.getvalue().endswith("\n")
+
+
+def test_find_latest_policy_checkpoint_prefers_latest(tmp_path):
+    (tmp_path / "1000.pth").write_text("numbered", encoding="utf-8")
+    latest_path = tmp_path / "latest.pth"
+    latest_path.write_text("latest", encoding="utf-8")
+
+    assert find_latest_policy_checkpoint(str(tmp_path)) == latest_path
+
+
+def test_find_latest_policy_checkpoint_uses_highest_iteration(tmp_path):
+    (tmp_path / "500.pth").write_text("old", encoding="utf-8")
+    newest_path = tmp_path / "1500.pth"
+    newest_path.write_text("new", encoding="utf-8")
+    (tmp_path / "final.pth").write_text("final", encoding="utf-8")
+
+    assert find_latest_policy_checkpoint(str(tmp_path)) == newest_path
+
+
+def test_find_latest_policy_checkpoint_uses_oom_guard_iteration(tmp_path):
+    (tmp_path / "1500.pth").write_text("numbered", encoding="utf-8")
+    guard_path = tmp_path / "oom_guard_iter1510.pth"
+    guard_path.write_text("guard", encoding="utf-8")
+
+    assert find_latest_policy_checkpoint(str(tmp_path)) == guard_path
+
+
+def test_find_latest_policy_checkpoint_returns_none_without_checkpoints(tmp_path):
+    (tmp_path / "notes.txt").write_text("not a checkpoint", encoding="utf-8")
+
+    assert find_latest_policy_checkpoint(str(tmp_path)) is None
 
 
 def test_name_suffix_is_appended_to_checkpoint_dir(monkeypatch):

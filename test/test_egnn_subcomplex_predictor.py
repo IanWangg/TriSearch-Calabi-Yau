@@ -377,11 +377,40 @@ def test_snn_simplex_subcomplex_logits_shape_and_padding():
     with torch.no_grad():
         value, logits = model.get_value_and_logits(batch)
 
+    assert model.value_feature_source == "snn_simplex"
     assert tuple(value.shape) == (2,)
     assert tuple(logits.shape) == (2, 3)
     assert torch.isfinite(logits[0, :3]).all()
     assert torch.isfinite(logits[1, :2]).all()
     assert torch.isneginf(logits[1, 2])
+
+
+def test_snn_simplex_get_value_matches_value_and_logits_value():
+    model = _build_snn_simplex_agent()
+    batch = _build_snn_batch()
+
+    with torch.no_grad():
+        value, _logits = model.get_value_and_logits(batch)
+        value_only = model.get_value(batch)
+
+    assert torch.allclose(value_only, value, atol=1e-6)
+
+
+def test_snn_simplex_value_loss_backpropagates_through_snn_layers():
+    model = _build_snn_simplex_agent().train()
+    batch = _build_snn_batch()
+
+    value, _logits = model.get_value_and_logits(batch)
+    value.sum().backward()
+
+    snn_gradients = [
+        parameter.grad
+        for parameter in model.snn_simplex_actor.parameters()
+        if parameter.requires_grad
+    ]
+    assert snn_gradients
+    assert all(gradient is not None for gradient in snn_gradients)
+    assert any(bool((gradient != 0).any().item()) for gradient in snn_gradients)
 
 
 def test_gcn_snn_simplex_subcomplex_logits_shape_and_padding():
@@ -716,6 +745,7 @@ def test_subcomplex_policy_factory_builds_egnn_and_gcn_agents():
     assert gcn_gnn_model.subcomplex_actor_type == "gnn"
     assert isinstance(snn_simplex_model, EGNNSubcomplexAgent)
     assert snn_simplex_model.subcomplex_actor_type == "snn_simplex"
+    assert snn_simplex_model.value_feature_source == "snn_simplex"
 
 
 def test_subcomplex_policy_factory_normalizes_default_actor_alias():

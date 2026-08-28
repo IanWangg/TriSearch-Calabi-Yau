@@ -13,6 +13,7 @@ from core.cy_policy_rollout_utils import (
     build_cy_data_list,
     compute_cy_state_count_bonus,
     compute_gae_with_dones,
+    evaluate_policy_values,
     rollout_step_with_policy,
 )
 from core.vertex_augmentation import SimilarityTransform
@@ -112,6 +113,22 @@ def _build_agent():
     ).eval()
 
 
+def _build_snn_simplex_agent():
+    torch.manual_seed(0)
+    return EGNNSubcomplexAgent(
+        in_channels=3,
+        out_channels=16,
+        hidden_channels=16,
+        num_layers=2,
+        share_encoder=True,
+        mlp_hidden_channel_list=[16],
+        use_projection=True,
+        act="silu",
+        subcomplex_actor_type="snn_simplex",
+        device="cpu",
+    ).eval()
+
+
 def test_batched_policy_action_selection_handles_mixed_actionability():
     state_a = SimpleGraphState(
         key="a",
@@ -167,6 +184,30 @@ def test_batched_policy_action_selection_handles_mixed_actionability():
     expected_idx = int(torch.argmax(logits, dim=1).item())
     expected_action = list(action_lists[0][expected_idx]) + [-1]
     assert result.actions_tensor[0].tolist() == expected_action
+
+
+def test_evaluate_policy_values_adds_simplex_topology_for_snn_value_source():
+    state = SimpleGraphState(
+        key="snn_value",
+        point_config_index=3,
+        vertices=[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        simplices=((0, 1, 2), (0, 2, 3)),
+    )
+    policy = _build_snn_simplex_agent()
+
+    result = evaluate_policy_values(
+        [state],
+        [[(0, 1, 2), (0, 2, 3)]],
+        policy,
+        device=torch.device("cpu"),
+    )
+
+    assert tuple(result.value_tensor.shape) == (1,)
 
 
 def test_build_cy_data_list_applies_vertex_preprocessing():

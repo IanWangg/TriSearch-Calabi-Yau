@@ -261,3 +261,42 @@ def test_cached_batched_actor_matches_slow_reference(device_name: str):
 
     assert torch.equal(cached_graph, slow_graph)
     assert torch.allclose(cached_features, slow_features, atol=1e-5, rtol=1e-5)
+
+
+def test_cached_batched_actor_exposes_same_simplex_features_as_slow_reference():
+    cached_batch = _build_actor_batch(include_cached_topology=True)
+    slow_batch = _build_actor_batch(include_cached_topology=False)
+
+    torch.manual_seed(321)
+    actor = SNNSimplexActor(
+        channels=4,
+        hidden_channels=6,
+        num_layers=2,
+    ).eval()
+    node_embeddings = torch.randn(cached_batch.num_nodes, 4)
+    num_available = cached_batch.num_available_subcomplexes.to(dtype=torch.long).view(-1)
+
+    with torch.no_grad():
+        cached_outputs = actor(
+            node_embeddings=node_embeddings,
+            subcomplex_vertices=cached_batch.subcomplex_vertices,
+            num_available_subcomplexes=num_available,
+            node_ptr=cached_batch.ptr,
+            batch=cached_batch,
+            return_simplex_features=True,
+        )
+        slow_outputs = actor._forward_slow(
+            node_embeddings=node_embeddings,
+            subcomplex_vertices=slow_batch.subcomplex_vertices,
+            num_available_subcomplexes=num_available,
+            node_ptr=slow_batch.ptr,
+            batch=slow_batch,
+            return_simplex_features=True,
+        )
+
+    cached_candidates, cached_candidate_graph, cached_simplexes, cached_simplex_graph = cached_outputs
+    slow_candidates, slow_candidate_graph, slow_simplexes, slow_simplex_graph = slow_outputs
+    assert torch.equal(cached_candidate_graph, slow_candidate_graph)
+    assert torch.equal(cached_simplex_graph, slow_simplex_graph)
+    assert torch.allclose(cached_candidates, slow_candidates, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(cached_simplexes, slow_simplexes, atol=1e-5, rtol=1e-5)

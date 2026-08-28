@@ -58,7 +58,10 @@ def _ensure_policy_device(policy: Any, device: torch.device) -> Any:
 
 
 def _policy_uses_simplex_topology(policy: Any) -> bool:
-    return str(getattr(policy, "subcomplex_actor_type", "")).strip().lower() == "snn_simplex"
+    return (
+        str(getattr(policy, "subcomplex_actor_type", "")).strip().lower() == "snn_simplex"
+        or str(getattr(policy, "value_feature_source", "")).strip().lower() == "snn_simplex"
+    )
 
 
 def infer_batch_subcomplex_width(
@@ -594,12 +597,14 @@ def evaluate_policy_values(
         raise ValueError("states must be non-empty.")
 
     policy = _ensure_policy_device(policy, device)
+    include_simplex_topology = _policy_uses_simplex_topology(policy)
     data_build_start = time.perf_counter()
     data_list = build_cy_data_list(
         states,
         action_lists,
         vertex_preprocessor=vertex_preprocessor,
         trajectory_transforms=trajectory_transforms,
+        include_simplex_topology=include_simplex_topology,
     )
     data_build_sec = time.perf_counter() - data_build_start
 

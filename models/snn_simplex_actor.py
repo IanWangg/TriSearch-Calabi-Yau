@@ -238,7 +238,8 @@ class SNNSimplexActor(nn.Module):
         num_available_subcomplexes: torch.Tensor,
         node_ptr: torch.Tensor,
         batch,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_simplex_features: bool = False,
+    ):
         device = node_embeddings.device
         dtype = node_embeddings.dtype
 
@@ -309,6 +310,13 @@ class SNNSimplexActor(nn.Module):
             include_self=True,
         )
         candidate_graph_indices = torch.repeat_interleave(graph_ids, num_available_subcomplexes)
+        if return_simplex_features:
+            return (
+                candidate_features,
+                candidate_graph_indices,
+                simplex_embeddings,
+                simplex_graph,
+            )
         return candidate_features, candidate_graph_indices
 
     def _forward_slow(
@@ -319,7 +327,8 @@ class SNNSimplexActor(nn.Module):
         num_available_subcomplexes: torch.Tensor,
         node_ptr: torch.Tensor,
         batch,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_simplex_features: bool = False,
+    ):
         simplex_vertices, num_top_simplices = self._extract_topology(
             batch=batch,
             device=node_embeddings.device,
@@ -332,6 +341,8 @@ class SNNSimplexActor(nn.Module):
         simplex_start = torch.cumsum(num_top_simplices, dim=0) - num_top_simplices
         candidate_features = []
         candidate_graph_indices = []
+        simplex_features = []
+        simplex_graph_indices = []
 
         for graph_idx in range(batch_size):
             num_candidates = int(num_available_subcomplexes[graph_idx].item())
@@ -365,6 +376,16 @@ class SNNSimplexActor(nn.Module):
                 dtype=node_embeddings.dtype,
             )
             simplex_embeddings = self._apply_snn_layers(laplacian, simplex_embeddings)
+            if return_simplex_features:
+                simplex_features.append(simplex_embeddings)
+                simplex_graph_indices.append(
+                    torch.full(
+                        (simplex_embeddings.size(0),),
+                        graph_idx,
+                        device=node_embeddings.device,
+                        dtype=torch.long,
+                    )
+                )
             candidate_features.append(
                 self._pool_candidate_simplex_embeddings(
                     simplex_embeddings,
@@ -383,7 +404,16 @@ class SNNSimplexActor(nn.Module):
 
         if not candidate_features:
             raise ValueError("Each graph must provide at least one candidate subcomplex.")
-        return torch.cat(candidate_features, dim=0), torch.cat(candidate_graph_indices, dim=0)
+        candidate_features_tensor = torch.cat(candidate_features, dim=0)
+        candidate_graph_indices_tensor = torch.cat(candidate_graph_indices, dim=0)
+        if return_simplex_features:
+            return (
+                candidate_features_tensor,
+                candidate_graph_indices_tensor,
+                torch.cat(simplex_features, dim=0),
+                torch.cat(simplex_graph_indices, dim=0),
+            )
+        return candidate_features_tensor, candidate_graph_indices_tensor
 
     def forward(
         self,
@@ -393,7 +423,8 @@ class SNNSimplexActor(nn.Module):
         num_available_subcomplexes: torch.Tensor,
         node_ptr: torch.Tensor,
         batch,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_simplex_features: bool = False,
+    ):
         if self._has_cached_topology(batch):
             return self._forward_cached(
                 node_embeddings=node_embeddings,
@@ -401,6 +432,7 @@ class SNNSimplexActor(nn.Module):
                 num_available_subcomplexes=num_available_subcomplexes,
                 node_ptr=node_ptr,
                 batch=batch,
+                return_simplex_features=return_simplex_features,
             )
         return self._forward_slow(
             node_embeddings=node_embeddings,
@@ -408,4 +440,5 @@ class SNNSimplexActor(nn.Module):
             num_available_subcomplexes=num_available_subcomplexes,
             node_ptr=node_ptr,
             batch=batch,
+            return_simplex_features=return_simplex_features,
         )

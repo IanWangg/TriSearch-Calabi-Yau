@@ -32,6 +32,7 @@ from core.cy_data_utils import mean_vertex_count, split_rows_by_vertex_count
 from core.train_cy import (
     maybe_filter_initial_state_pool,
     normalize_subcomplex_actor_type,
+    value_feature_source_for_subcomplex_actor,
     validate_cy_volume_reward_transform_args,
     validate_neighbor_mode_args,
 )
@@ -998,6 +999,7 @@ def main(args: argparse.Namespace) -> None:
         subcomplex_actor_type = normalize_subcomplex_actor_type(
             getattr(args, "subcomplex_actor_type", "gnn")
         )
+        value_feature_source = value_feature_source_for_subcomplex_actor(subcomplex_actor_type)
         policy = EGNNSubcomplexAgent(
             in_channels=resolved_in_channels,
             out_channels=args.out_channels,
@@ -1012,6 +1014,7 @@ def main(args: argparse.Namespace) -> None:
         load_policy_checkpoint(policy, checkpoint_path, map_location=device)
         print(f"Using policy in_channels={resolved_in_channels}")
         print(f"Using subcomplex_actor_type={subcomplex_actor_type}")
+        print(f"Using value_feature_source={value_feature_source}")
         print(f"Loaded checkpoint: {checkpoint_path}")
         if vertex_preprocessor is not None:
             print(f"Applying eval preprocessing: {vertex_preprocessor.mode}")

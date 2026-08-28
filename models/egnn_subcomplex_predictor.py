@@ -299,6 +299,7 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         )
 
         self.subcomplex_actor_type = self._normalize_subcomplex_actor_type(subcomplex_actor_type)
+        self.value_feature_source = self._value_feature_source_for_actor(self.subcomplex_actor_type)
         if self.subcomplex_actor_type == "snn_simplex":
             self.snn_simplex_actor = SNNSimplexActor(
                 channels=out_channels,
@@ -336,6 +337,11 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
                 f"Expected one of: {', '.join(cls.SUPPORTED_SUBCOMPLEX_ACTOR_TYPES)}."
             )
         return resolved_actor_type
+
+    @staticmethod
+    def _value_feature_source_for_actor(subcomplex_actor_type: str) -> str:
+        resolved_actor_type = str(subcomplex_actor_type).strip().lower()
+        return "snn_simplex" if resolved_actor_type == "snn_simplex" else "egnn"
 
     def _extract_batched_subcomplex_data(self, batch, device):
         if not hasattr(batch, "subcomplex_vertices"):
@@ -543,8 +549,7 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         if not self.share_encoder:
             global_feature_add = gnn.pool.global_max_pool(z_add_before_proj, batch.batch)
             global_feature = (global_feature + global_feature_add) / 2.0
-
-        value = self.value_head(global_feature)
+        value_feature = global_feature
 
         if self.subcomplex_actor_type in ("gnn", "circuit_pool", "snn_simplex"):
             policy_node_embeddings = (
@@ -568,12 +573,23 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
             )
             logits_flat = self.subcomplex_decoder_head(subcomplex_features).squeeze(-1)
         elif self.subcomplex_actor_type == "snn_simplex":
-            subcomplex_features, _candidate_graph_index = self.snn_simplex_actor(
+            (
+                subcomplex_features,
+                _candidate_graph_index,
+                simplex_features,
+                simplex_graph_index,
+            ) = self.snn_simplex_actor(
                 node_embeddings=policy_node_embeddings,
                 subcomplex_vertices=subcomplex_vertices,
                 num_available_subcomplexes=num_available_subcomplexes,
                 node_ptr=batch.ptr,
                 batch=batch,
+                return_simplex_features=True,
+            )
+            value_feature = gnn.pool.global_max_pool(
+                simplex_features,
+                simplex_graph_index,
+                size=int(num_available_subcomplexes.numel()),
             )
             logits_flat = self.subcomplex_decoder_head(subcomplex_features).squeeze(-1)
         else:
@@ -591,6 +607,7 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
                     dim=-1,
                 )
             logits_flat = self.subcomplex_head(policy_features).squeeze(-1)
+        value = self.value_head(value_feature)
         logits_padded = self._build_padded_logits(logits_flat, num_available_subcomplexes)
         return value.squeeze(-1), logits_padded
 
@@ -618,6 +635,10 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         return selected_actions_padded, action_indices, value.squeeze(-1), log_probs, entropy
 
     def get_value(self, batch):
+        if self.value_feature_source == "snn_simplex":
+            value, _logits = self.get_value_and_logits(batch)
+            return value
+
         node_coord = batch.x
         node_feature = batch.x
         edge_index = batch.edge_index

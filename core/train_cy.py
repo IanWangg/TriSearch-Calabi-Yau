@@ -26,6 +26,7 @@ from core.training_types import (
     PPOTrainStats,
 )
 from core.cy_runtime_utils import (
+    load_policy_checkpoint,
     memory_guard_triggered,
     read_process_memory_gb,
     resolve_training_device,
@@ -376,6 +377,41 @@ def save_policy_checkpoint(policy: EGNNSubcomplexAgent, checkpoint_path: str) ->
     os.replace(tmp_path, path)
 
 
+def _checkpoint_iteration(path: Path) -> int | None:
+    stem = path.stem
+    if stem.isdigit():
+        return int(stem)
+    if stem.startswith("oom_guard_iter"):
+        suffix = stem.removeprefix("oom_guard_iter")
+        if suffix.isdigit():
+            return int(suffix)
+    return None
+
+
+def find_latest_policy_checkpoint(checkpoint_dir: str) -> Path | None:
+    checkpoint_path = Path(checkpoint_dir)
+    if not checkpoint_path.is_dir():
+        return None
+
+    latest_path = checkpoint_path / "latest.pth"
+    if latest_path.is_file():
+        return latest_path
+
+    candidates = [path for path in checkpoint_path.glob("*.pth") if path.is_file()]
+    if not candidates:
+        return None
+
+    iteration_candidates = [
+        (iteration, path)
+        for path in candidates
+        if (iteration := _checkpoint_iteration(path)) is not None
+    ]
+    if iteration_candidates:
+        return max(iteration_candidates, key=lambda item: item[0])[1]
+
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
 def save_iteration_checkpoints(
     *,
     policy: EGNNSubcomplexAgent,
@@ -689,6 +725,11 @@ def normalize_subcomplex_actor_type(subcomplex_actor_type: str) -> str:
     return resolved_actor_type
 
 
+def value_feature_source_for_subcomplex_actor(subcomplex_actor_type: str) -> str:
+    resolved_actor_type = normalize_subcomplex_actor_type(subcomplex_actor_type)
+    return "snn_simplex" if resolved_actor_type == "snn_simplex" else "egnn"
+
+
 def build_training_variant_suffix(args: argparse.Namespace) -> str:
     suffix_parts: List[str] = []
     subcomplex_actor_type = normalize_subcomplex_actor_type(
@@ -696,6 +737,9 @@ def build_training_variant_suffix(args: argparse.Namespace) -> str:
     )
     if subcomplex_actor_type != "mlp":
         suffix_parts.append(f"actor_{subcomplex_actor_type}")
+    value_feature_source = value_feature_source_for_subcomplex_actor(subcomplex_actor_type)
+    if value_feature_source != "egnn":
+        suffix_parts.append(f"value_{value_feature_source}")
 
     if bool(getattr(args, "vertex_aug_enable", False)):
         suffix_parts.append("rollout_aug")
@@ -886,6 +930,7 @@ def main(args: argparse.Namespace) -> None:
     subcomplex_actor_type = normalize_subcomplex_actor_type(
         getattr(args, "subcomplex_actor_type", "gnn")
     )
+    value_feature_source = value_feature_source_for_subcomplex_actor(subcomplex_actor_type)
 
     objective_prefix = f"{args.reward_function}_" if args.reward_function else ""
     checkpoint_dir = build_checkpoint_dir(
@@ -913,6 +958,17 @@ def main(args: argparse.Namespace) -> None:
     ).to(device)
     print(f"Using policy in_channels={resolved_in_channels}")
     print(f"Using subcomplex_actor_type={subcomplex_actor_type}")
+    print(f"Using value_feature_source={value_feature_source}")
+    latest_policy_checkpoint = find_latest_policy_checkpoint(checkpoint_dir)
+    if latest_policy_checkpoint is not None:
+        print(f"Loading policy checkpoint from {latest_policy_checkpoint}")
+        load_policy_checkpoint(policy, str(latest_policy_checkpoint), map_location=device)
+        print(
+            "Loaded policy checkpoint. Optimizer state and iteration counters are "
+            "not restored because existing checkpoints contain policy weights only."
+        )
+    else:
+        print(f"No existing policy checkpoint found in {checkpoint_dir}; starting fresh.")
     if args.vertex_aug_enable:
         print(
             "Using rollout vertex augmentation: "
@@ -936,6 +992,7 @@ def main(args: argparse.Namespace) -> None:
                 "coordinate_dim": dataset_coordinate_dim,
                 "resolved_in_channels": resolved_in_channels,
                 "subcomplex_actor_type": subcomplex_actor_type,
+                "value_feature_source": value_feature_source,
                 "objective_goal": objective_goal,
                 "train_polytopes": len(split.train_polytope_indices),
                 "eval_polytopes": len(split.eval_polytope_indices),
