@@ -223,6 +223,65 @@ def test_max_cy_volume_registration_direction_caching_and_metric_reuse():
     assert destination_cy.volume_calls == 1
 
 
+def test_max_kcup_log_reward_caching_and_raw_metric_reuse():
+    source_cy = _FakeCY(4.0)
+    destination_cy = _FakeCY(9.5)
+    source = SimpleNamespace(
+        key="source",
+        cy_triangulation=_FakeCYTriangulation(source_cy),
+    )
+    destination = SimpleNamespace(
+        key="destination",
+        cy_triangulation=_FakeCYTriangulation(destination_cy),
+    )
+    reward = get_reward("max_kcup")
+    objective = get_objective("max_kcup", reward=reward)
+
+    assert infer_goal("max_kcup") == "max"
+    assert objective(source) == 4.0
+    assert reward(source, destination) == pytest.approx(math.log(9.5 / 4.0))
+    assert objective(destination) == 9.5
+    assert source_cy.mori_cone_calls == 1
+    assert destination_cy.mori_cone_calls == 1
+    assert source_cy.toric_kahler_cone_calls == 0
+    assert destination_cy.toric_kahler_cone_calls == 0
+    assert source_cy.volume_calls == 1
+    assert destination_cy.volume_calls == 1
+
+
+@pytest.mark.parametrize(
+    "current_volume,next_volume",
+    [(0.0, 2.0), (2.0, 0.0), (-1.0, 2.0)],
+)
+def test_max_kcup_log_reward_rejects_nonpositive_volumes(
+    current_volume,
+    next_volume,
+):
+    source_cy = _FakeCY(current_volume)
+    destination_cy = _FakeCY(next_volume)
+    source = SimpleNamespace(
+        key="source",
+        cy_triangulation=_FakeCYTriangulation(source_cy),
+    )
+    destination = SimpleNamespace(
+        key="destination",
+        cy_triangulation=_FakeCYTriangulation(destination_cy),
+    )
+    reward = get_reward("max_kcup")
+
+    with pytest.raises(ValueError, match="strictly positive volumes"):
+        reward(source, destination)
+    with pytest.raises(ValueError, match="strictly positive volumes"):
+        reward(source, destination)
+    assert source_cy.volume_calls == 1
+    assert destination_cy.volume_calls == 1
+
+
+def test_max_kcup_is_available_in_train_and_eval_clis():
+    assert parse_train_args(["--reward", "max_kcup"]).reward_function == "max_kcup"
+    assert parse_eval_args(["--reward", "max_kcup"]).reward_function == "max_kcup"
+
+
 def test_max_cy_volume_log_reward_is_exact_and_keeps_raw_metric():
     source_cy = _FakeCY(4.0)
     destination_cy = _FakeCY(9.5)

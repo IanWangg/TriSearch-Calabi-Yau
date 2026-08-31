@@ -234,6 +234,42 @@ class _FlushTrackingStream(io.StringIO):
         super().flush()
 
 
+def test_iteration_metrics_records_raw_volume_for_max_kcup():
+    train_summary = _volume_rollout_summary()
+    train_summary.objective_name = "max_kcup"
+    train_stats = PPOTrainStats(
+        total_loss=1.0,
+        policy_loss=2.0,
+        value_loss=3.0,
+        entropy_loss=4.0,
+        explained_variance=5.0,
+        clip_ratio=6.0,
+        num_samples=160,
+        num_valid_action_samples=150,
+    )
+
+    record = build_iteration_metrics_record(
+        iteration=0,
+        reward_function="max_kcup",
+        cy_volume_reward_transform="raw",
+        rollout_summary=train_summary,
+        eval_summary=None,
+        train_stats=train_stats,
+        deterministic_rollout=True,
+        deterministic_eval=True,
+        rollout_sec=1.0,
+        bootstrap_sec=2.0,
+        prepare_sec=3.0,
+        train_sec=4.0,
+        eval_sec=0.0,
+        iteration_sec=10.0,
+    )
+
+    assert record["reward_function"] == "max_kcup"
+    assert record["train"]["raw_volume"]["initial_mean"] == 16.5
+    assert record["train"]["raw_volume"]["mean_best_volume_improvement"] == 1.0
+
+
 def test_iteration_metrics_writer_emits_one_jsonl_record_and_flushes():
     stream = _FlushTrackingStream()
 

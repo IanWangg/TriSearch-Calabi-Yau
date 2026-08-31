@@ -453,8 +453,10 @@ def _return_metrics_payload(summary: PolicyRolloutSummary) -> Dict[str, float]:
 
 
 def build_raw_volume_metrics(summary: PolicyRolloutSummary) -> Dict[str, Any]:
-    if summary.objective_name != "max_cy_volume":
-        raise ValueError("Raw volume metrics require objective_name='max_cy_volume'.")
+    if summary.objective_name not in {"max_cy_volume", "max_kcup"}:
+        raise ValueError(
+            "Raw volume metrics require objective_name='max_cy_volume' or 'max_kcup'."
+        )
 
     initial_values = [float(value) for value in summary.objective_initial_values or ()]
     final_values = [float(value) for value in summary.objective_final_values or ()]
@@ -501,7 +503,7 @@ def _rollout_iteration_metrics_payload(
         "return": _return_metrics_payload(summary),
         "elapsed_sec": float(elapsed_sec),
     }
-    if summary.objective_name == "max_cy_volume":
+    if summary.objective_name in {"max_cy_volume", "max_kcup"}:
         payload["raw_volume"] = build_raw_volume_metrics(summary)
     return payload
 

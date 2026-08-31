@@ -6,6 +6,7 @@ from reward_functions.common import Reward
 from reward_functions.min_tri import MinTriangulationReward
 from reward_functions.max_tri import MaxTriangulationReward
 from reward_functions.max_cy_volume import MaxCYVolumeReward
+from reward_functions.max_kcup import MaxKcupReward
 from reward_functions.max_toric_cy_volume import MaxToricCYVolumeReward
 
 Goal = Literal["min", "max"]
@@ -13,6 +14,7 @@ SUPPORTED_REWARDS = (
     "min_tri",
     "max_tri",
     "max_cy_volume",
+    "max_kcup",
     "max_toric_cy_volume",
 )
 CY_VOLUME_REWARD_TRANSFORMS = MaxCYVolumeReward.supported_transforms
@@ -45,6 +47,8 @@ def get_reward(name: str, *, cy_volume_reward_transform: str = "raw") -> Reward:
         return MaxTriangulationReward()
     if normalized == "max_cy_volume":
         return MaxCYVolumeReward(transform=resolved_transform)
+    if normalized == "max_kcup":
+        return MaxKcupReward()
     if normalized == "max_toric_cy_volume":
         return MaxToricCYVolumeReward()
     raise AssertionError(f"Unhandled reward function '{normalized}'.")
@@ -63,6 +67,11 @@ def get_objective(name: str, *, reward: Reward | None = None) -> Callable:
                 "max_cy_volume objective requires a MaxCYVolumeReward instance."
             )
         return volume_reward.metric
+    if normalized == "max_kcup":
+        kcup_reward = reward if reward is not None else MaxKcupReward()
+        if not isinstance(kcup_reward, MaxKcupReward):
+            raise TypeError("max_kcup objective requires a MaxKcupReward instance.")
+        return kcup_reward.metric
     if normalized == "max_toric_cy_volume":
         volume_reward = reward if reward is not None else MaxToricCYVolumeReward()
         if not isinstance(volume_reward, MaxToricCYVolumeReward):
