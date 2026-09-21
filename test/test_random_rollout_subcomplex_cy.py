@@ -1,6 +1,7 @@
 from typing import Dict, Iterable, Tuple
 
 import numpy as np
+import pytest
 
 import mdp.cy_rollout as cy_rollout
 from mdp.cy_rollout import CYRandomRolloutEngine, create_transition_pool
@@ -258,7 +259,7 @@ def test_expand_states_multiprocessing_matches_sequential():
     assert seq_engine.graph_edge_count() == mp_engine.graph_edge_count() == 2
 
 
-def test_expand_states_falls_back_when_multiprocessing_pool_breaks(monkeypatch):
+def test_expand_states_does_not_replay_inline_when_multiprocessing_pool_breaks():
     point_config_index = 23
     a_simplices = ((0, 1, 2), (0, 2, 3))
     b_simplices = ((0, 1, 3), (0, 3, 4))
@@ -285,19 +286,13 @@ def test_expand_states_falls_back_when_multiprocessing_pool_breaks(monkeypatch):
             raise RuntimeError("simulated pool failure")
 
     pool = BrokenPool()
-    monkeypatch.setattr(cy_rollout, "_CY_ROLLOUT_MP_DISABLED", False)
-
-    actions, summary = engine.candidate_actions_for_states(
-        [state_a],
-        use_multiprocessing=True,
-        transition_pool=pool,
-        transition_mp_chunksize=8,
-        transition_mp_min_batch=1,
-    )
-
-    assert actions == [((0, 1, 2, 3),)]
-    assert summary.expanded_count == 1
-    assert summary.discovered_count == 1
-    assert summary.used_multiprocessing is False
+    with pytest.raises(RuntimeError, match="simulated pool failure"):
+        engine.candidate_actions_for_states(
+            [state_a],
+            use_multiprocessing=True,
+            transition_pool=pool,
+            transition_mp_chunksize=8,
+            transition_mp_min_batch=1,
+        )
+    assert state_a.find_calls == 0
     assert pool.calls == 1
-    assert cy_rollout._CY_ROLLOUT_MP_DISABLED is True

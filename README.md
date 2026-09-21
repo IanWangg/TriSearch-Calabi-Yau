@@ -41,12 +41,25 @@ Curated runnable artifacts are included:
 - 3D sample dataset: `data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl`
 - 4D sample dataset: `data/cy/output4d/cy4d_random_flip_100_3_random_flip.samples.jsonl`
 - Compact two-neighbor h11=12 experiment dataset: `data/cy/two_neighbors_h11_12.samples.jsonl`
-- 4D policy checkpoint: `ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/final.pth`
+- 4D GNN policy checkpoint: `ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/final.pth`
+- SNN policy checkpoint: `ckpt/cy_train_h15_snn/latest.pth`
 - K3 source data: `cy_data/k3.txt`
 
 Bulk generated outputs from the source repo are intentionally not copied.
 
 ## Common Commands
+
+CY policy APIs default to the simplex-topology-aware `snn_simplex` actor and
+value features. Pass `--subcomplex_actor_type gnn` when training or loading a
+legacy GNN checkpoint.
+
+Training and rollout now isolate geometry in managed workers, bound retained
+graphs and tensor caches, and keep exact visitation history on disk. `main.sh`
+enables parallel geometry with a 64 GiB job budget and a 16 GiB retained-cache
+allowance. Canonical action ordering is the new default; it preserves geometry
+but can change trajectories relative to earlier native-order seeded runs.
+See [managed rollout runtime](docs/cy_managed_runtime.md) for controls, process
+cleanup guarantees, memory accounting, and reproducible benchmarks.
 
 One-iteration training smoke:
 
@@ -100,6 +113,7 @@ Checkpoint evaluation smoke:
 python scripts/eval_cy.py \
   --dataset_path data/cy/output4d/cy4d_random_flip_100_3_random_flip.samples.jsonl \
   --checkpoint_path ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/final.pth \
+  --subcomplex_actor_type gnn \
   --max_rows 4 \
   --num_eval_polytopes 1 \
   --eval_steps 1 \
@@ -224,6 +238,9 @@ python scripts/train_cy.py \
   --num_iterations 1000 \
   --num_states 128 \
   --rollout_length 20 \
+  --use_multiprocessing \
+  --memory_budget_gb 64 \
+  --runtime_cache_gb 16 \
   --batch_size 128 \
   --num_eval_polytopes 20 \
   --num_eval_states 128 \

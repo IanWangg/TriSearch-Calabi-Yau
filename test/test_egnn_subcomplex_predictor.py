@@ -119,6 +119,7 @@ def _build_agent():
         mlp_hidden_channel_list=[16],
         use_projection=True,
         act="silu",
+        subcomplex_actor_type="gnn",
         device="cpu",
     ).eval()
 
@@ -149,6 +150,7 @@ def _build_gcn_agent():
         mlp_hidden_channel_list=[16],
         use_projection=True,
         act="silu",
+        subcomplex_actor_type="gnn",
         device="cpu",
     ).eval()
 
@@ -737,10 +739,12 @@ def test_subcomplex_policy_factory_builds_egnn_and_gcn_agents():
     assert isinstance(circuit_pool_model, EGNNSubcomplexAgent)
     assert circuit_pool_model.subcomplex_actor_type == "circuit_pool"
     assert isinstance(gnn_model, EGNNSubcomplexAgent)
-    assert egnn_model.subcomplex_actor_type == "gnn"
+    assert egnn_model.subcomplex_actor_type == "snn_simplex"
+    assert egnn_model.value_feature_source == "snn_simplex"
     assert gnn_model.subcomplex_actor_type == "gnn"
     assert isinstance(gcn_model, GCNSubcomplexAgent)
-    assert gcn_model.subcomplex_actor_type == "gnn"
+    assert gcn_model.subcomplex_actor_type == "snn_simplex"
+    assert gcn_model.value_feature_source == "snn_simplex"
     assert isinstance(gcn_gnn_model, GCNSubcomplexAgent)
     assert gcn_gnn_model.subcomplex_actor_type == "gnn"
     assert isinstance(snn_simplex_model, EGNNSubcomplexAgent)
@@ -760,7 +764,8 @@ def test_subcomplex_policy_factory_normalizes_default_actor_alias():
         device="cpu",
     )
 
-    assert model.subcomplex_actor_type == "gnn"
+    assert model.subcomplex_actor_type == "snn_simplex"
+    assert model.value_feature_source == "snn_simplex"
 
 
 def test_predictor_decode_shape_and_sigmoid_consistency():

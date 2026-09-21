@@ -1,7 +1,9 @@
 from itertools import combinations
+import inspect
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Self, Tuple
 
 from mdp.triangulation_state import TriangulationState, simplices_key
+from mdp.cy_state_record import BoundedCache
 
 try:
     from cytools.triangulation import Triangulation as CYToolsTriangulation
@@ -112,8 +114,10 @@ def _face_restriction_map(triangulation: CYToolsTriangulation) -> Dict[
 def _two_neighbor_circuit(
     source: CYToolsTriangulation,
     destination: CYToolsTriangulation,
+    source_faces: Optional[Dict[Tuple[int, ...], FrozenSet[Tuple[int, ...]]]] = None,
 ) -> Tuple[int, ...]:
-    source_faces = _face_restriction_map(source)
+    if source_faces is None:
+        source_faces = _face_restriction_map(source)
     destination_faces = _face_restriction_map(destination)
     if source_faces.keys() != destination_faces.keys():
         raise RuntimeError(
@@ -160,13 +164,15 @@ class CYTriangulationState(TriangulationState):
             Dict[Tuple[int, ...], Tuple[FrozenSet[Tuple[int, ...]], FrozenSet[Tuple[int, ...]]]],
             FrozenSet[Tuple[int, ...]],
         ],
-    ] = {}
+    ] = BoundedCache()
     _SHARED_NEIGHBOUR_FLIP_CACHE: Dict[
         str,
         Tuple[Tuple[FrozenSet[Tuple[int, ...]], FrozenSet[Tuple[int, ...]]], ...],
-    ] = {}
-    _SHARED_SUBCOMPLEX_TRANSITION_CACHE: Dict[str, Dict[Tuple[int, ...], CYTransitionOutput]] = {}
-    _SHARED_SUBCOMPLEX_NEIGHBOUR_CACHE: Dict[str, Dict[Tuple[int, ...], CYToolsTriangulation]] = {}
+    ] = BoundedCache()
+    _SHARED_SUBCOMPLEX_TRANSITION_CACHE: Dict[str, Dict[Tuple[int, ...], CYTransitionOutput]] = BoundedCache()
+    _SHARED_SUBCOMPLEX_NEIGHBOUR_CACHE: Dict[str, Dict[Tuple[int, ...], CYToolsTriangulation]] = BoundedCache(
+        max_entries=32, max_bytes=64 * 1024**2
+    )
 
     def __init__(
         self,
@@ -236,6 +242,7 @@ class CYTriangulationState(TriangulationState):
 
         self._subcomplex_transition_cache: Dict[Tuple[int, ...], CYTransitionOutput] = {}
         self._subcomplex_neighbour_cache: Dict[Tuple[int, ...], CYToolsTriangulation] = {}
+        self._two_neighbor_circuits: Dict[int, Tuple[int, ...]] = {}
         self._load_cached_transition_cache()
         self._load_cached_neighbour_cache()
 
@@ -287,9 +294,15 @@ class CYTriangulationState(TriangulationState):
             raise AssertionError("cy_triangulation is not provided.")
         if self.neighbours is None:
             if self.neighbor_mode == "two_neighbors":
-                neighbours = self.cy_triangulation.neighbor_triangulations(
-                    two_neighbors=True
-                )
+                method = self.cy_triangulation.neighbor_triangulations
+                if "two_neighbors_track_flips" in inspect.signature(method).parameters:
+                    tracked_neighbours = method(two_neighbors=True, two_neighbors_track_flips=True)
+                    neighbours = []
+                    for neighbour, _face_index, circuit in tracked_neighbours:
+                        self._two_neighbor_circuits[id(neighbour)] = tuple(sorted(int(v) for v in circuit))
+                        neighbours.append(neighbour)
+                else:
+                    neighbours = method(two_neighbors=True)
             else:
                 try:
                     neighbours = self.cy_triangulation.neighbor_triangulations(only_regular=True)
@@ -318,6 +331,7 @@ class CYTriangulationState(TriangulationState):
         subcomplex_actions: List[Tuple[int, ...]] = []
         seen_subcomplexes: set[Tuple[int, ...]] = set()
         ambiguous_subcomplexes: set[Tuple[int, ...]] = set()
+        source_faces = None
 
         for neighbour in self.find_neightbours():
             if self.neighbor_mode == "two_neighbors" and not (
@@ -344,7 +358,11 @@ class CYTriangulationState(TriangulationState):
             flips.append((flip_from, flip_to))
 
             if self.neighbor_mode == "two_neighbors":
-                subcomplex = _two_neighbor_circuit(self.cy_triangulation, neighbour)
+                subcomplex = self._two_neighbor_circuits.get(id(neighbour))
+                if subcomplex is None:
+                    if source_faces is None:
+                        source_faces = _face_restriction_map(self.cy_triangulation)
+                    subcomplex = _two_neighbor_circuit(self.cy_triangulation, neighbour, source_faces)
             else:
                 subcomplex = self._changed_vertices_from_flips(flip_from, flip_to)
             if subcomplex not in seen_subcomplexes:
@@ -481,10 +499,16 @@ class CYTriangulationState(TriangulationState):
         flip_from, flip_to = self.get_flips_from_subcomplex_action(target_subcomplex)
         transition_output = self.transition(flip_from, flip_to)
         self._subcomplex_transition_cache[target_subcomplex] = transition_output
-        if self.key not in self._SHARED_SUBCOMPLEX_TRANSITION_CACHE:
-            self._SHARED_SUBCOMPLEX_TRANSITION_CACHE[self.key] = {}
-        self._SHARED_SUBCOMPLEX_TRANSITION_CACHE[self.key][target_subcomplex] = transition_output
+        # Reinsert the whole value so admission limits account for its growth.
+        self._SHARED_SUBCOMPLEX_TRANSITION_CACHE[self.key] = dict(self._subcomplex_transition_cache)
         return transition_output
+
+    def release_geometry_cache(self) -> None:
+        """Release neighbour references retained on this particular state."""
+        self.neighbours = None
+        self._subcomplex_neighbour_cache.clear()
+        self._two_neighbor_circuits.clear()
+        self._SHARED_SUBCOMPLEX_NEIGHBOUR_CACHE.pop(self.key, None)
 
     def get_next_cy_triangulation_from_subcomplex_action(
         self,

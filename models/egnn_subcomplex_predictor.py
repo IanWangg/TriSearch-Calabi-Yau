@@ -8,6 +8,13 @@ from .act_resolver import activation_resolver
 from .egnn import EGNN
 from .egnn_encoder import EGNNEncoder
 from .snn_simplex_actor import SNNSimplexActor
+from .subcomplex_policy_config import (
+    DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
+    SUBCOMPLEX_ACTOR_TYPE_ALIASES,
+    SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
+    normalize_subcomplex_actor_type,
+    value_feature_source_for_subcomplex_actor,
+)
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 
@@ -268,8 +275,8 @@ class EGNNSubcomplexPredictor(EGNNEncoder):
 
 
 class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
-    SUPPORTED_SUBCOMPLEX_ACTOR_TYPES = ("mlp", "gnn", "circuit_pool", "snn_simplex", "default")
-    LEGACY_SUBCOMPLEX_ACTOR_ALIASES = {"default": "gnn"}
+    SUPPORTED_SUBCOMPLEX_ACTOR_TYPES = SUPPORTED_SUBCOMPLEX_ACTOR_TYPES
+    LEGACY_SUBCOMPLEX_ACTOR_ALIASES = SUBCOMPLEX_ACTOR_TYPE_ALIASES
 
     def __init__(
         self,
@@ -282,7 +289,7 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         mlp_hidden_channel_list=[64],
         use_projection=True,
         act="silu",
-        subcomplex_actor_type="gnn",
+        subcomplex_actor_type=DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
         device="cpu",
     ):
         super(EGNNSubcomplexAgent, self).__init__(
@@ -326,22 +333,11 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
 
     @classmethod
     def _normalize_subcomplex_actor_type(cls, subcomplex_actor_type):
-        resolved_actor_type = str(subcomplex_actor_type).strip().lower()
-        resolved_actor_type = cls.LEGACY_SUBCOMPLEX_ACTOR_ALIASES.get(
-            resolved_actor_type,
-            resolved_actor_type,
-        )
-        if resolved_actor_type not in cls.SUPPORTED_SUBCOMPLEX_ACTOR_TYPES:
-            raise ValueError(
-                f"Unsupported subcomplex_actor_type '{subcomplex_actor_type}'. "
-                f"Expected one of: {', '.join(cls.SUPPORTED_SUBCOMPLEX_ACTOR_TYPES)}."
-            )
-        return resolved_actor_type
+        return normalize_subcomplex_actor_type(subcomplex_actor_type)
 
     @staticmethod
     def _value_feature_source_for_actor(subcomplex_actor_type: str) -> str:
-        resolved_actor_type = str(subcomplex_actor_type).strip().lower()
-        return "snn_simplex" if resolved_actor_type == "snn_simplex" else "egnn"
+        return value_feature_source_for_subcomplex_actor(subcomplex_actor_type)
 
     def _extract_batched_subcomplex_data(self, batch, device):
         if not hasattr(batch, "subcomplex_vertices"):
@@ -537,13 +533,21 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         edge_index = batch.edge_index
         edge_attr = None
 
-        z_remove, z_add, z_remove_before_proj, z_add_before_proj = self.encode_projection(
-            h=node_feature,
-            x=node_coord,
-            edges=edge_index,
-            edge_attr=edge_attr,
-            return_z_before_proj=True,
-        )
+        if self.subcomplex_actor_type in ("gnn", "circuit_pool", "snn_simplex"):
+            # These actors and their critics use the encoder embeddings directly.
+            # Avoid retaining unused projections (and updating unused BatchNorm).
+            z_remove_before_proj, z_add_before_proj = self.encode(
+                h=node_feature, x=node_coord, edges=edge_index, edge_attr=edge_attr,
+            )
+            z_remove, z_add = z_remove_before_proj, z_add_before_proj
+        else:
+            z_remove, z_add, z_remove_before_proj, z_add_before_proj = self.encode_projection(
+                h=node_feature,
+                x=node_coord,
+                edges=edge_index,
+                edge_attr=edge_attr,
+                return_z_before_proj=True,
+            )
 
         global_feature = gnn.pool.global_max_pool(z_remove_before_proj, batch.batch)
         if not self.share_encoder:
@@ -563,6 +567,8 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
             batch=batch,
             device=policy_node_embeddings.device,
         )
+        if subcomplex_vertices.size(0) == 0 and self.subcomplex_actor_type != "snn_simplex":
+            return self.value_head(value_feature).squeeze(-1), value_feature.new_empty((global_feature.size(0), 0))
         if self.subcomplex_actor_type == "gnn":
             subcomplex_features, _candidate_graph_index = self._decode_and_pool_batched_subcomplex_embeddings(
                 node_embeddings=policy_node_embeddings,
@@ -644,13 +650,16 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         edge_index = batch.edge_index
         edge_attr = None
 
-        _, _, z_remove_before_proj, z_add_before_proj = self.encode_projection(
-            h=node_feature,
-            x=node_coord,
-            edges=edge_index,
-            edge_attr=edge_attr,
-            return_z_before_proj=True,
-        )
+        if self.subcomplex_actor_type == "mlp":
+            # Retain the legacy BatchNorm update population for projected PPO.
+            _, _, z_remove_before_proj, z_add_before_proj = self.encode_projection(
+                h=node_feature, x=node_coord, edges=edge_index,
+                edge_attr=edge_attr, return_z_before_proj=True,
+            )
+        else:
+            z_remove_before_proj, z_add_before_proj = self.encode(
+                h=node_feature, x=node_coord, edges=edge_index, edge_attr=edge_attr,
+            )
 
         global_feature = gnn.pool.global_max_pool(z_remove_before_proj, batch.batch)
         if not self.share_encoder:

@@ -109,6 +109,7 @@ def _build_agent():
         mlp_hidden_channel_list=[16],
         use_projection=True,
         act="silu",
+        subcomplex_actor_type="gnn",
         device="cpu",
     ).eval()
 

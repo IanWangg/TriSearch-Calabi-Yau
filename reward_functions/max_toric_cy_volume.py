@@ -2,6 +2,7 @@ import math
 from typing import TYPE_CHECKING, Any, Dict
 
 from reward_functions.common import Reward
+from core.cy_bounded_cache import BoundedLRU
 
 if TYPE_CHECKING:
     from mdp.cy_triangulation_state import CYTriangulationState
@@ -15,9 +16,12 @@ class MaxToricCYVolumeReward(Reward):
     reward_name = "max_toric_cy_volume"
 
     def __init__(self) -> None:
-        self._objective_by_state_key: Dict[str, float] = {}
+        self._objective_by_state_key = BoundedLRU(max_bytes=16 * 1024**2, max_entries=8192)
 
     def metric(self, state: CYTriangulationState) -> float:
+        provider = getattr(state, "objective_value", None)
+        if callable(provider):
+            return float(provider(self.reward_name))
         state_key = str(state.key)
         cached_objective = self._objective_by_state_key.get(state_key)
         if cached_objective is not None:

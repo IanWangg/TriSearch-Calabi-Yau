@@ -6,11 +6,28 @@ import torch.nn as nn
 
 from .egnn_subcomplex_predictor import EGNNSubcomplexAgent
 from .gcn_subcomplex_predictor import GCNSubcomplexAgent
+from .subcomplex_policy_config import (
+    DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
+    SUBCOMPLEX_ACTOR_TYPE_ALIASES,
+    SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
+    normalize_subcomplex_actor_type,
+    value_feature_source_for_subcomplex_actor,
+)
 
 
 SUPPORTED_SUBCOMPLEX_MODEL_TYPES = ("egnn", "gcn")
-SUPPORTED_SUBCOMPLEX_ACTOR_TYPES = EGNNSubcomplexAgent.SUPPORTED_SUBCOMPLEX_ACTOR_TYPES
-SUBCOMPLEX_ACTOR_TYPE_ALIASES = {"default": "gnn"}
+
+__all__ = [
+    "DEFAULT_SUBCOMPLEX_ACTOR_TYPE",
+    "SUBCOMPLEX_ACTOR_TYPE_ALIASES",
+    "SUPPORTED_SUBCOMPLEX_ACTOR_TYPES",
+    "SUPPORTED_SUBCOMPLEX_MODEL_TYPES",
+    "build_subcomplex_agent",
+    "get_subcomplex_agent_class",
+    "normalize_subcomplex_actor_type",
+    "normalize_subcomplex_model_type",
+    "value_feature_source_for_subcomplex_actor",
+]
 
 
 def normalize_subcomplex_model_type(model_type: str) -> str:
@@ -21,20 +38,6 @@ def normalize_subcomplex_model_type(model_type: str) -> str:
             f"Expected one of: {', '.join(SUPPORTED_SUBCOMPLEX_MODEL_TYPES)}."
         )
     return resolved_model_type
-
-
-def normalize_subcomplex_actor_type(subcomplex_actor_type: str) -> str:
-    resolved_actor_type = str(subcomplex_actor_type).strip().lower()
-    resolved_actor_type = SUBCOMPLEX_ACTOR_TYPE_ALIASES.get(
-        resolved_actor_type,
-        resolved_actor_type,
-    )
-    if resolved_actor_type not in SUPPORTED_SUBCOMPLEX_ACTOR_TYPES:
-        raise ValueError(
-            f"Unsupported subcomplex_actor_type '{subcomplex_actor_type}'. "
-            f"Expected one of: {', '.join(SUPPORTED_SUBCOMPLEX_ACTOR_TYPES)}."
-        )
-    return resolved_actor_type
 
 
 def get_subcomplex_agent_class(model_type: str) -> Type[nn.Module]:
@@ -58,7 +61,7 @@ def build_subcomplex_agent(
     mlp_hidden_channel_list=None,
     use_projection: bool = True,
     act: str = "silu",
-    subcomplex_actor_type: str = "gnn",
+    subcomplex_actor_type: str = DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
     device="cpu",
 ) -> nn.Module:
     if mlp_hidden_channel_list is None:

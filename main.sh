@@ -1,6 +1,6 @@
 cd /home/yiranwang/combinartorics/TriSearch-Calabi-Yau
 
-RUN_ID="min_tri_$(date +%Y%m%d_%H%M%S)"
+RUN_ID="max_tri_$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="runs/${RUN_ID}"
 mkdir -p "${RUN_DIR}/wandb" "${RUN_DIR}/checkpoints"
 set -o pipefail
@@ -15,6 +15,9 @@ PYTHONUNBUFFERED=1 \
   --num_epochs 1 \
   --num_states 128 \
   --rollout_length 20 \
+  --use_multiprocessing \
+  --memory_budget_gb 64 \
+  --runtime_cache_gb 16 \
   --batch_size 128 \
   --num_eval_polytopes 20 \
   --num_eval_states 128 \
@@ -23,7 +26,6 @@ PYTHONUNBUFFERED=1 \
   --checkpoint_path "${RUN_DIR}/checkpoints" \
   --latest_checkpoint_interval 10 \
   --save_interval 500 \
-  --report_every 5 \
   --use_wandb \
   --wandb_project calabi_yau_min_tri \
   --name_suffix "${RUN_ID}" \

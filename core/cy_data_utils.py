@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch_geometric as pyg
 from torch_geometric.data import Batch, Data
 
-from mdp.cy_triangulation_state import CYTriangulationState, create_state_from_cy_triangulation
+from core.cy_bounded_cache import BoundedLRU
+
+if TYPE_CHECKING:
+    from mdp.cy_triangulation_state import CYTriangulationState
 
 from core.snn_simplex_topology import (
     SNNSimplexTopologyTensors,
@@ -19,12 +22,6 @@ from core.snn_simplex_topology import (
 )
 from core.training_types import CYDatasetSplit
 from core.vertex_preprocessing import VertexPreprocessor
-
-try:
-    from cytools.polytope import Polytope
-except ModuleNotFoundError:
-    Polytope = None
-
 
 @dataclass(frozen=True)
 class K3Record:
@@ -41,13 +38,64 @@ class _CachedCYGraphTensors:
     edge_index_cpu: torch.Tensor
 
 
-_CYGraphCacheKey = Tuple[str, int, int, int, int]
+_CYGraphCacheKey = Tuple[Any, ...]
 _CYSubcomplexCacheKey = Tuple[_CYGraphCacheKey, Tuple[Tuple[int, ...], ...], int]
 
-_CY_GRAPH_TENSOR_CACHE: Dict[_CYGraphCacheKey, _CachedCYGraphTensors] = {}
-_CY_SUBCOMPLEX_TENSOR_CACHE: Dict[_CYSubcomplexCacheKey, torch.Tensor] = {}
-_CY_SIMPLEX_TOPOLOGY_CACHE: Dict[_CYGraphCacheKey, torch.Tensor] = {}
-_CY_SNN_SIMPLEX_TOPOLOGY_CACHE: Dict[_CYSubcomplexCacheKey, SNNSimplexTopologyTensors] = {}
+_DEFAULT_TENSOR_CACHE_BYTES = 4 * 1024**3
+_CY_GRAPH_TENSOR_CACHE = BoundedLRU(_DEFAULT_TENSOR_CACHE_BYTES // 5)
+_CY_SUBCOMPLEX_TENSOR_CACHE = BoundedLRU(_DEFAULT_TENSOR_CACHE_BYTES // 5)
+_CY_SIMPLEX_TOPOLOGY_CACHE = BoundedLRU(_DEFAULT_TENSOR_CACHE_BYTES // 5)
+_CY_SNN_SIMPLEX_TOPOLOGY_CACHE = BoundedLRU(_DEFAULT_TENSOR_CACHE_BYTES // 5)
+_CY_VERTEX_TENSOR_CACHE = BoundedLRU(_DEFAULT_TENSOR_CACHE_BYTES // 5)
+
+
+def _cy_tensor_caches():
+    return {
+        "graph": _CY_GRAPH_TENSOR_CACHE,
+        "subcomplex": _CY_SUBCOMPLEX_TENSOR_CACHE,
+        "simplex_topology": _CY_SIMPLEX_TOPOLOGY_CACHE,
+        "snn_simplex_topology": _CY_SNN_SIMPLEX_TOPOLOGY_CACHE,
+        "vertices": _CY_VERTEX_TENSOR_CACHE,
+    }
+
+
+def configure_cy_data_tensor_caches(*, max_bytes: int = _DEFAULT_TENSOR_CACHE_BYTES, max_entries: int | None = None) -> Dict[str, Dict[str, int]]:
+    """Set a combined admission-time ceiling, including shared coordinates."""
+    if int(max_bytes) < 0:
+        raise ValueError("max_bytes must be non-negative.")
+    per_cache_bytes = int(max_bytes) // len(_cy_tensor_caches())
+    for cache in _cy_tensor_caches().values():
+        cache.max_entries = None if max_entries is None else max(0, int(max_entries))
+        cache.resize(max_bytes=per_cache_bytes, max_entries=max_entries)
+    return get_cy_data_tensor_cache_stats()
+
+
+def get_cy_data_tensor_cache_stats() -> Dict[str, Dict[str, int]]:
+    return {name: cache.stats() for name, cache in _cy_tensor_caches().items()}
+
+
+def _get_cached_vertices(state: CYTriangulationState) -> torch.Tensor:
+    vertices = tuple(tuple(point) for point in state.vertices)
+    key = ("raw", int(getattr(state, "point_config_index", -1)), vertices)
+    cached = _CY_VERTEX_TENSOR_CACHE.get(key)
+    if cached is None:
+        cached = torch.tensor(vertices, dtype=torch.float, device="cpu")
+        _CY_VERTEX_TENSOR_CACHE[key] = cached
+    return cached
+
+
+def get_cached_transformed_vertices(vertices: torch.Tensor, transform: Any) -> torch.Tensor:
+    from core.vertex_augmentation import apply_similarity_transform
+
+    # Tensor objects in the key keep their identities alive while cached. Include
+    # version counters to avoid stale results if a caller changes a transform.
+    key = ("augmentation", vertices, vertices._version,
+           transform.matrix, transform.matrix._version, transform.bias, transform.bias._version)
+    cached = _CY_VERTEX_TENSOR_CACHE.get(key)
+    if cached is None:
+        cached = apply_similarity_transform(vertices, transform)
+        _CY_VERTEX_TENSOR_CACHE[key] = cached
+    return cached
 
 
 def _cy_state_key(state: CYTriangulationState) -> str:
@@ -59,12 +107,16 @@ def _cy_state_key(state: CYTriangulationState) -> str:
 
 
 def _cy_data_cache_key(state: CYTriangulationState) -> _CYGraphCacheKey:
+    configuration = getattr(state, "configuration", None)
+    if configuration is None:
+        configuration = tuple(tuple(point) for point in getattr(state, "vertices", ()))
     return (
         _cy_state_key(state),
         int(getattr(state, "point_config_index", -1)),
         len(getattr(state, "vertices", ())),
         len(getattr(state, "edges", ())),
         len(getattr(state, "simplices", ())),
+        configuration,
     )
 
 
@@ -75,7 +127,7 @@ def _get_cached_cy_graph_tensors(state: CYTriangulationState) -> _CachedCYGraphT
         return cached
 
     cached = _CachedCYGraphTensors(
-        x_cpu=torch.tensor(state.vertices, dtype=torch.float, device="cpu"),
+        x_cpu=_get_cached_vertices(state),
         edge_index_cpu=pyg.utils.to_undirected(_edge_keys_to_index_tensor(state.edges)).cpu(),
     )
     _CY_GRAPH_TENSOR_CACHE[key] = cached
@@ -155,12 +207,7 @@ def _get_cached_cy_snn_simplex_topology_tensors(
 
 
 def get_cy_data_tensor_cache_sizes() -> Dict[str, int]:
-    return {
-        "graph": len(_CY_GRAPH_TENSOR_CACHE),
-        "subcomplex": len(_CY_SUBCOMPLEX_TENSOR_CACHE),
-        "simplex_topology": len(_CY_SIMPLEX_TOPOLOGY_CACHE),
-        "snn_simplex_topology": len(_CY_SNN_SIMPLEX_TOPOLOGY_CACHE),
-    }
+    return {name: len(cache) for name, cache in _cy_tensor_caches().items()}
 
 
 def prune_cy_data_tensor_caches(
@@ -186,22 +233,8 @@ def prune_cy_data_tensor_caches(
                 _CY_SNN_SIMPLEX_TOPOLOGY_CACHE.pop(cache_key, None)
 
     if max_entries_int is not None:
-        if len(_CY_GRAPH_TENSOR_CACHE) > max_entries_int:
-            overflow = len(_CY_GRAPH_TENSOR_CACHE) - max_entries_int
-            for key in list(_CY_GRAPH_TENSOR_CACHE.keys())[:overflow]:
-                _CY_GRAPH_TENSOR_CACHE.pop(key, None)
-        if len(_CY_SUBCOMPLEX_TENSOR_CACHE) > max_entries_int:
-            overflow = len(_CY_SUBCOMPLEX_TENSOR_CACHE) - max_entries_int
-            for key in list(_CY_SUBCOMPLEX_TENSOR_CACHE.keys())[:overflow]:
-                _CY_SUBCOMPLEX_TENSOR_CACHE.pop(key, None)
-        if len(_CY_SIMPLEX_TOPOLOGY_CACHE) > max_entries_int:
-            overflow = len(_CY_SIMPLEX_TOPOLOGY_CACHE) - max_entries_int
-            for key in list(_CY_SIMPLEX_TOPOLOGY_CACHE.keys())[:overflow]:
-                _CY_SIMPLEX_TOPOLOGY_CACHE.pop(key, None)
-        if len(_CY_SNN_SIMPLEX_TOPOLOGY_CACHE) > max_entries_int:
-            overflow = len(_CY_SNN_SIMPLEX_TOPOLOGY_CACHE) - max_entries_int
-            for key in list(_CY_SNN_SIMPLEX_TOPOLOGY_CACHE.keys())[:overflow]:
-                _CY_SNN_SIMPLEX_TOPOLOGY_CACHE.pop(key, None)
+        for cache in _cy_tensor_caches().values():
+            cache.resize(max_entries=max_entries_int)
 
     return get_cy_data_tensor_cache_sizes()
 
@@ -312,10 +345,9 @@ def triangulate_n_lattice_polytope(
     *,
     include_points_interior_to_facets: bool = True,
 ) -> Dict[str, Any]:
-    if Polytope is None:
-        raise ModuleNotFoundError(
-            "cytools is required for CY triangulation loading. Activate the 'sage' environment."
-        )
+    # Keep geometry imports local: trainer observation building uses only tensors.
+    from mdp.cy_triangulation_state import CYTriangulationState as _CYTriangulationState
+    from cytools.polytope import Polytope
 
     m_vertices = np.asarray(k3_record.m_vertices, dtype=np.int64)
     m_polytope = Polytope(m_vertices)
@@ -343,6 +375,8 @@ def load_cy_3d_dataset(
     include_points_interior_to_facets: bool = True,
     precompute_actions: bool = True,
 ) -> List[Dict[str, Any]]:
+    from mdp.cy_triangulation_state import create_state_from_cy_triangulation
+
     records = load_k3_records(k3_path=k3_path, max_polytopes=max_polytopes)
     dataset_entries: List[Dict[str, Any]] = []
 
@@ -438,10 +472,16 @@ def create_data_from_cy_state_with_subcomplex(
     cached_graph = _get_cached_cy_graph_tensors(state)
     vertices_tensor = cached_graph.x_cpu
     if vertex_preprocessor is not None:
-        vertices_tensor = vertex_preprocessor.transform_vertices(
-            point_config_index=int(state.point_config_index),
-            vertices=vertices_tensor,
-        )
+        preprocess_key = ("preprocessing", vertices_tensor, vertices_tensor._version,
+                          vertex_preprocessor.mode, vertex_preprocessor.eps,
+                          vertex_preprocessor.whitening_trace_scale)
+        transformed = _CY_VERTEX_TENSOR_CACHE.get(preprocess_key)
+        if transformed is None:
+            transformed = vertex_preprocessor.transform_vertices(
+                point_config_index=int(state.point_config_index), vertices=vertices_tensor,
+            )
+            _CY_VERTEX_TENSOR_CACHE[preprocess_key] = transformed
+        vertices_tensor = transformed
 
     subcomplex_vertices = _get_cached_cy_subcomplex_tensor(
         state=state,

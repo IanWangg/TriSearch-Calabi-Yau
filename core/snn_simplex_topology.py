@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import Counter, defaultdict
+from itertools import combinations
+from math import comb
 from typing import Iterable
 
 import torch
@@ -161,24 +164,36 @@ def _build_candidate_simplex_memberships(
     candidate_ids = []
     simplex_ids = []
     simplex_rows = simplex_vertices.tolist()
+    simplex_width = int(simplex_vertices.size(1))
+    simplices_by_vertices = defaultdict(list)
+    for simplex_id, simplex in enumerate(simplex_rows):
+        simplices_by_vertices[tuple(sorted(simplex))].append(simplex_id)
+    simplices_by_vertex = None
     for candidate_id, candidate_vertices in enumerate(subcomplex_vertices.tolist()):
         candidate_vertex_set = {int(vertex) for vertex in candidate_vertices if int(vertex) >= 0}
-        candidate_simplex_ids = []
-        for simplex_id, simplex in enumerate(simplex_rows):
-            if all(int(vertex) in candidate_vertex_set for vertex in simplex):
-                candidate_simplex_ids.append(simplex_id)
-
-        # A two-neighbor circuit is lower-dimensional than an ambient FRST
-        # simplex. In that case, pool the current top-simplex cofaces of the
-        # circuit's source faces (all but one of the circuit vertices).
-        if not candidate_simplex_ids and len(candidate_vertex_set) < simplex_vertices.size(1):
-            required_overlap = max(1, len(candidate_vertex_set) - 1)
-            candidate_simplex_ids = [
+        candidate_size = len(candidate_vertex_set)
+        if candidate_size >= simplex_width and comb(candidate_size, simplex_width) <= min(4096, len(simplex_rows)):
+            # Flip circuits normally add only one vertex to a top simplex. A
+            # handful of indexed subset lookups replaces a full simplex scan.
+            candidate_simplex_ids = sorted(
                 simplex_id
-                for simplex_id, simplex in enumerate(simplex_rows)
-                if len(candidate_vertex_set.intersection(int(vertex) for vertex in simplex))
-                >= required_overlap
-            ]
+                for vertices in combinations(sorted(candidate_vertex_set), simplex_width)
+                for simplex_id in simplices_by_vertices.get(vertices, ())
+            )
+        else:
+            if simplices_by_vertex is None:
+                simplices_by_vertex = defaultdict(list)
+                for simplex_id, simplex in enumerate(simplex_rows):
+                    for vertex in set(simplex):
+                        simplices_by_vertex[vertex].append(simplex_id)
+            overlaps = Counter(
+                simplex_id for vertex in candidate_vertex_set
+                for simplex_id in simplices_by_vertex.get(vertex, ())
+            )
+            # Lower-dimensional two-neighbor circuits use top-simplex cofaces
+            # containing all but one circuit vertex, as in the original rule.
+            required_overlap = simplex_width if candidate_size >= simplex_width else max(1, candidate_size - 1)
+            candidate_simplex_ids = sorted(simplex_id for simplex_id, count in overlaps.items() if count >= required_overlap)
 
         if not candidate_simplex_ids:
             raise ValueError(

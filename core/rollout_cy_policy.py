@@ -1,11 +1,12 @@
 import argparse
 import time
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Sequence
 
 import numpy as np
 import torch
 
+from core.cy_evaluation_config import add_managed_runtime_arguments, managed_rollout_runtime
 from mdp.cy_rollout import (
     CYRandomRolloutEngine,
     build_cy_rollout_collection,
@@ -14,11 +15,21 @@ from mdp.cy_rollout import (
     runtime_cache_hot_size,
     runtime_cache_total_unique_states,
 )
-from core.train_cy import normalize_subcomplex_actor_type
+from models.subcomplex_policy_config import (
+    DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
+    normalize_subcomplex_actor_type,
+)
+from core.cy_runtime_utils import (
+    increment_visitation,
+    read_process_memory_gb,
+    resolve_training_device,
+    set_seeds,
+)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_managed_runtime_arguments(parser)
     parser.add_argument(
         "--dataset_path",
         type=str,
@@ -56,14 +67,14 @@ def parse_args() -> argparse.Namespace:
         "--transition_num_workers",
         type=int,
         default=0,
-        help="Number of worker processes. <=0 uses os.cpu_count() in TransitionPool.",
+        help="Number of worker processes. 0 selects up to eight within CPU and memory limits.",
     )
     parser.add_argument(
         "--transition_mp_start_method",
         type=str,
         default="spawn",
         choices=["spawn", "fork", "forkserver"],
-        help="Multiprocessing start method for expansion workers.",
+        help="Managed geometry requires spawn; other retained choices raise an explicit error.",
     )
     parser.add_argument(
         "--transition_mp_chunksize",
@@ -111,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--subcomplex_actor_type",
         type=str,
-        default="gnn",
+        default=DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
         choices=["mlp", "gnn", "circuit_pool", "snn_simplex", "default"],
         help="Subcomplex actor architecture for the untrained policy.",
     )
@@ -134,49 +145,20 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Run a very small rollout for a quick smoke test.",
     )
-    return parser.parse_args()
-
-
-def read_process_memory_gb() -> Tuple[float, float]:
-    rss_kb = 0.0
-    hwm_kb = 0.0
-    try:
-        with open("/proc/self/status", "r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.startswith("VmRSS:"):
-                    rss_kb = float(line.split()[1])
-                elif line.startswith("VmHWM:"):
-                    hwm_kb = float(line.split()[1])
-    except OSError:
-        return 0.0, 0.0
-    return rss_kb / (1024.0 * 1024.0), hwm_kb / (1024.0 * 1024.0)
-
-
-def increment_visitation(states: Iterable[object]) -> None:
-    for state in states:
-        if hasattr(state, "visitation"):
-            state.visitation += 1
-
-
-def resolve_policy_device(gpu_index: int, *, force_cpu: bool = False) -> torch.device:
-    if force_cpu or not torch.cuda.is_available():
-        return torch.device("cpu")
-    if torch.cuda.device_count() <= int(gpu_index):
-        raise RuntimeError(
-            f"Requested gpu_index={gpu_index}, but only {torch.cuda.device_count()} CUDA devices are visible."
-        )
-    device = torch.device(f"cuda:{int(gpu_index)}")
-    torch.cuda.set_device(device)
-    return device
+    return parser.parse_args(argv)
 
 
 def main(args: argparse.Namespace) -> None:
+    with managed_rollout_runtime(args, create_transition_pool) as runtime:
+        _run_rollout(args, *runtime)
+
+
+def _run_rollout(args, transition_pool, cache_budget_bytes, register_engine) -> None:
     from core.cy_policy_rollout_utils import PPORolloutBuffer, evaluate_policy_values, rollout_step_with_policy
-    from models.egnn_subcomplex_predictor import EGNNSubcomplexAgent
+    from models.subcomplex_policy_factory import build_subcomplex_agent
 
     rng = np.random.default_rng(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    set_seeds(args.seed)
 
     if args.dry_run:
         args.max_rows = 2 if args.max_rows is None else min(int(args.max_rows), 2)
@@ -188,7 +170,10 @@ def main(args: argparse.Namespace) -> None:
             f"max_rows={args.max_rows}, num_envs={args.num_envs}, rollout_steps={args.rollout_steps}"
         )
 
-    device = resolve_policy_device(args.gpu_index, force_cpu=bool(args.force_cpu))
+    device = resolve_training_device(
+        gpu_index=args.gpu_index,
+        force_cpu=bool(args.force_cpu),
+    )
     if device.type == "cuda":
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
@@ -206,6 +191,7 @@ def main(args: argparse.Namespace) -> None:
     collection = build_cy_rollout_collection(
         rows,
         include_points_interior_to_facets=args.include_points_interior_to_facets,
+        transition_pool=transition_pool,
     )
     build_sec = time.perf_counter() - build_start
     print(
@@ -221,8 +207,12 @@ def main(args: argparse.Namespace) -> None:
         include_points_interior_to_facets=args.include_points_interior_to_facets,
         state_cache_mode=args.state_cache_mode,
         max_hot_states=args.max_hot_states,
+        transition_pool=transition_pool,
+        cache_budget_bytes=cache_budget_bytes,
     )
-    policy = EGNNSubcomplexAgent(
+    register_engine(engine)
+    policy = build_subcomplex_agent(
+        model_type="egnn",
         in_channels=args.in_channels,
         out_channels=args.out_channels,
         hidden_channels=args.hidden_channels,
@@ -234,15 +224,10 @@ def main(args: argparse.Namespace) -> None:
         device=str(device),
     ).to(device).eval()
 
-    transition_pool = None
     if args.use_multiprocessing:
-        transition_pool = create_transition_pool(
-            num_workers=args.transition_num_workers,
-            start_method=args.transition_mp_start_method,
-        )
         print(
-            "Multiprocessing enabled: "
-            f"workers={args.transition_num_workers}, "
+            "Managed geometry workers: "
+            f"workers={transition_pool.num_workers}, "
             f"start_method={args.transition_mp_start_method}, "
             f"chunksize={args.transition_mp_chunksize}, "
             f"min_batch={args.transition_mp_min_batch}"
@@ -472,9 +457,13 @@ def main(args: argparse.Namespace) -> None:
             f"hwm_gb={hwm_gb:.2f} "
             f"gpu_peak_mem_mb={gpu_peak_mem_mb:.1f}"
         )
+        print(
+            f"managed_workers={transition_pool.num_workers} "
+            f"owned_rss_gb={transition_pool.memory_snapshot.get('rss_bytes', 0) / 1024**3:.2f} "
+            f"resident_graph_nodes={engine.memory_stats()['resident_graph_nodes']}"
+        )
     finally:
-        if transition_pool is not None:
-            transition_pool.shutdown()
+        engine.close()
 
 
 if __name__ == "__main__":

@@ -258,3 +258,4 @@ def test_collect_policy_rollout_reports_full_horizon_return(monkeypatch, capsys)
     assert summary.training_return_mean == -1.0
     assert summary.intrinsic_bonus_mean == 1.0
     assert "step=" not in capsys.readouterr().out
+

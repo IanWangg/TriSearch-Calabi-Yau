@@ -1,27 +1,23 @@
+from __future__ import annotations
+
 import json
-import multiprocessing as mp
-import warnings
+import sys
 from collections import OrderedDict
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-try:
-    # Import cytools before CYTriangulationState. The reverse order can segfault
-    # in the Sage/FLINT stack when Polytope(...) is constructed later.
-    from cytools.polytope import Polytope
-    from core.cytools_config import configure_cytools
-    configure_cytools()
-except ModuleNotFoundError:
-    Polytope = None
+from core.cy_bounded_cache import BoundedLRU, retained_size
+from core.cy_process_runtime import ManagedProcessPool
+from core.cy_state_history import StateHistory
+from mdp.cy_state_record import CyStateRecord, CYPointConfiguration, normalize_neighbor_mode as _normalize_neighbor_mode
+from mdp.cy_geometry_worker import execute_geometry_request
 
-from mdp.cy_triangulation_state import (
-    CYTriangulationState,
-    _normalize_neighbor_mode,
-)
+# An explicitly injected geometry factory remains supported for lightweight
+# downstream tests. Production collection construction always uses workers.
+Polytope = None
 
 from mdp.cy_graph import (  # noqa: F401
     CanonicalAction,
@@ -55,12 +51,13 @@ def create_runtime_state_cache(
     mode: str,
     base_states: Mapping[str, Any],
     max_hot_states: int,
+    max_bytes: int = 1024**3,
 ) -> RuntimeStateCache:
     return RuntimeStateCache(
         mode=str(mode),
         base_states=dict(base_states),
         max_hot_states=max(1, int(max_hot_states)),
-        hot_states=OrderedDict(),
+        hot_states=BoundedLRU(max_bytes=max_bytes, max_entries=max_hot_states if mode == "lru" else None),
         runtime_unique_keys=set(),
     )
 
@@ -81,15 +78,17 @@ def register_runtime_state(cache: RuntimeStateCache, state: Any) -> bool:
     if key in cache.base_states:
         return False
 
-    is_new_unique = key not in cache.runtime_unique_keys
-    if is_new_unique:
-        cache.runtime_unique_keys.add(key)
+    if hasattr(cache.runtime_unique_keys, "counts"):
+        is_new_unique = cache.runtime_unique_keys.add(key)
+    else:
+        is_new_unique = key not in cache.runtime_unique_keys
+        if is_new_unique:
+            cache.runtime_unique_keys.add(key)
 
     if cache.mode == "none":
         return is_new_unique
 
     cache.hot_states[key] = state
-    cache.hot_states.move_to_end(key)
     if cache.mode == "lru":
         while len(cache.hot_states) > cache.max_hot_states:
             cache.hot_states.popitem(last=False)
@@ -108,26 +107,19 @@ def runtime_cache_hot_size(cache: RuntimeStateCache) -> int:
 # Transition pool (was mdp/cy_transition_pool.py)
 # ---------------------------------------------------------------------------
 
-class TransitionPool:
-    def __init__(self, num_workers: int = 0, start_method: str = "spawn"):
-        resolved_workers = num_workers if num_workers and num_workers > 0 else (mp.cpu_count() or 1)
-        mp_context = mp.get_context(start_method)
-        self._executor = ProcessPoolExecutor(max_workers=resolved_workers, mp_context=mp_context)
-
-    def map(self, func, iterable, chunksize: int = 1):
-        return list(self._executor.map(func, iterable, chunksize=chunksize))
-
-    def shutdown(self):
-        self._executor.shutdown(wait=True)
+TransitionPool = ManagedProcessPool
 
 
-def create_transition_pool(num_workers: int = 0, start_method: str = "spawn") -> TransitionPool:
-    return TransitionPool(num_workers=num_workers, start_method=start_method)
-
-_CY_ROLLOUT_MP_DISABLED = False
-
+def create_transition_pool(num_workers: int = 0, start_method: str = "spawn", **kwargs) -> TransitionPool:
+    from mdp.cy_geometry_worker import clear_geometry_caches
+    kwargs.setdefault("worker_reclaim", clear_geometry_caches)
+    return TransitionPool(num_workers=num_workers, start_method=start_method, **kwargs)
 
 def get_cy_shared_cache_sizes() -> Dict[str, int]:
+    module = sys.modules.get("mdp.cy_triangulation_state")
+    if module is None:
+        return dict.fromkeys(("subcomplex", "neighbour_flip", "subcomplex_transition", "subcomplex_neighbour"), 0)
+    CYTriangulationState = module.CYTriangulationState
     return {
         "subcomplex": len(CYTriangulationState._SHARED_SUBCOMPLEX_CACHE),
         "neighbour_flip": len(CYTriangulationState._SHARED_NEIGHBOUR_FLIP_CACHE),
@@ -141,6 +133,10 @@ def prune_cy_shared_caches(
     keep_keys: Iterable[str] | None,
     max_entries: int | None,
 ) -> Dict[str, int]:
+    module = sys.modules.get("mdp.cy_triangulation_state")
+    if module is None:
+        return get_cy_shared_cache_sizes()
+    CYTriangulationState = module.CYTriangulationState
     max_entries_int = None if max_entries is None or int(max_entries) <= 0 else int(max_entries)
     keep_key_set = None if keep_keys is None else {str(key) for key in keep_keys}
 
@@ -248,12 +244,13 @@ def _iter_row_initial_simplices(row: Mapping[str, Any]) -> Iterable[List[List[in
         yield [list(simplex) for simplex in canonical_simplices]
 
 
-def build_cy_rollout_collection(
+def _build_cy_rollout_collection_inline(
     rows: Sequence[dict],
     *,
     include_points_interior_to_facets: bool,
     neighbor_mode: str = "regular",
 ) -> CYRolloutCollection:
+    from mdp.cy_triangulation_state import CYTriangulationState
     if Polytope is None:
         raise ModuleNotFoundError(
             "cytools is required for CY rollout. Activate the 'sage' environment."
@@ -336,6 +333,50 @@ def build_cy_rollout_collection(
     )
 
 
+def build_cy_rollout_collection(
+    rows: Sequence[dict],
+    *,
+    include_points_interior_to_facets: bool,
+    neighbor_mode: str = "regular",
+    transition_pool: Any = None,
+) -> CYRolloutCollection:
+    mode = _normalize_neighbor_mode(neighbor_mode)
+    if mode == "two_neighbors" and include_points_interior_to_facets:
+        raise ValueError("neighbor_mode='two_neighbors' requires include_points_interior_to_facets=False.")
+    if Polytope is not None:
+        return _build_cy_rollout_collection_inline(rows, include_points_interior_to_facets=include_points_interior_to_facets, neighbor_mode=mode)
+    owned = transition_pool is None
+    pool = transition_pool or create_transition_pool(num_workers=1)
+    base_states, initial_states, configurations = {}, {}, {}
+    try:
+        requests = ({"operation": "build_collection", "row": row,
+                     "include_points_interior_to_facets": include_points_interior_to_facets,
+                     "neighbor_mode": mode} for row in rows)
+        for result in pool.imap(execute_geometry_request, requests):
+            configuration = result["configuration"]
+            if configuration.index in configurations and configurations[configuration.index] != configuration:
+                raise ValueError(f"Conflicting point configuration {configuration.index}.")
+            configurations[configuration.index] = configuration
+            for state in result["base_states"]:
+                state.configuration = configuration
+                base_states.setdefault(state.key, state)
+            for key in result["initial_keys"]:
+                initial_states.setdefault(key, base_states[key])
+        if not initial_states:
+            raise ValueError("No validated FRST initial states were found in the dataset." if mode == "two_neighbors" else "No non-fine initial states were found in the dataset.")
+        return CYRolloutCollection(
+            base_states=base_states, initial_states=list(initial_states.values()),
+            polytope_by_index=configurations,
+            vertices_by_polytope={i: c.input_vertices for i, c in configurations.items()},
+            polytope_indices=sorted(configurations), transition_pool=pool,
+            owns_transition_pool=owned,
+        )
+    except BaseException:
+        if owned:
+            pool.shutdown()
+        raise
+
+
 def _expand_cy_state_worker(payload: Tuple[Any, bool]) -> CYStateExpansion:
     state, objective_mode = payload
     simplices = _sorted_simplices_tuple(getattr(state, "simplices", ()))
@@ -402,6 +443,10 @@ class CYRandomRolloutEngine:
         is_target_state_fn: Optional[Callable[[Any], bool]] = None,
         reward_function: Optional[Callable[[Any, Any], float]] = None,
         neighbor_mode: str = "regular",
+        cache_budget_bytes: int = 4 * 1024**3,
+        history_path: str | None = None,
+        transition_pool: Any = None,
+        action_order: str = "canonical",
     ):
         if collection is not None:
             base_states = collection.base_states
@@ -424,25 +469,59 @@ class CYRandomRolloutEngine:
             mode=state_cache_mode,
             base_states=self.base_states,
             max_hot_states=max_hot_states,
+            max_bytes=max(0, int(cache_budget_bytes)) // 4,
         )
         self.state_factory = state_factory or self._default_state_factory
         self.is_target_state_fn = is_target_state_fn or default_is_target_state
         self.reward_function = reward_function
+        if action_order not in ("canonical", "native"):
+            raise ValueError("action_order must be 'canonical' or 'native'.")
+        self.action_order = action_order
+        self.transition_pool = transition_pool or getattr(collection, "transition_pool", None)
+        self._owned_collection = collection if getattr(collection, "owns_transition_pool", False) else None
+        self._managed = any(isinstance(state, CyStateRecord) for state in self.base_states.values())
+        history_cache_bytes = min(8 * 1024**2, max(0, int(cache_budget_bytes)) // 64)
+        objective_cache_bytes = min(16 * 1024**2, max(0, int(cache_budget_bytes)) // 16)
+        self.history = StateHistory(history_path, cache_bytes=history_cache_bytes) if self._managed else None
+        if self.history is not None and len(self.history.keys("discovered")):
+            self.history.close()
+            self.history = None
+            raise ValueError("Rollout history is run-local; use a fresh history_path for a new engine. "
+                             "Existing checkpoints restore policy weights, not rollout history.")
+        if self.history is not None:
+            self.state_cache.runtime_unique_keys = self.history.keys("materialized")
+        self._discovered_keys = self.history.keys("discovered") if self.history else set()
+        self._expanded_keys = self.history.keys("expanded") if self.history else set()
+        self._cumulative_edges = 0
+        self._base_edges = 0
+        self._polytope_totals = {}
+        self._graph_max_bytes = (max(0, int(cache_budget_bytes)) * 3 // 4
+                                 - history_cache_bytes - objective_cache_bytes)
+        self._graph_max_entries = max(1, int(max_hot_states))
+        self._graph_bytes = 0
+        self._node_sizes = {}
+        self._graph_evictions = 0
+        self._objective_cache = BoundedLRU(max_bytes=objective_cache_bytes, max_entries=8192)
+        self._active_keys = set()
 
-        self.nodes_by_key: Dict[str, CYGraphNode] = {}
+        self.nodes_by_key: Dict[str, CYGraphNode] = OrderedDict()
         self.graph_by_polytope: Dict[int, Dict[str, CYGraphNode]] = {}
         for state in self.base_states.values():
+            if isinstance(state, CyStateRecord):
+                state.bind_objective_provider(self.objective_value)
             self._register_state_node(state)
+        self.prune_runtime_caches()
 
-    def _default_state_factory(self, point_config_index: int, simplices: CanonicalSimplices) -> CYTriangulationState:
-        if Polytope is None:
-            raise ModuleNotFoundError(
-                "cytools is required for CY rollout. Activate the 'sage' environment."
-            )
+    def _default_state_factory(self, point_config_index: int, simplices: CanonicalSimplices) -> Any:
         if point_config_index not in self.polytope_by_index:
             raise KeyError(f"Unknown polytope index {point_config_index}")
 
         polytope = self.polytope_by_index[point_config_index]
+        if isinstance(polytope, CYPointConfiguration):
+            state = CyStateRecord(polytope, frozenset(simplices), self.neighbor_mode)
+            state.bind_objective_provider(self.objective_value)
+            return state
+        from mdp.cy_triangulation_state import CYTriangulationState
         triangulation = polytope.triangulate(
             simplices=[list(simplex) for simplex in simplices],
             include_points_interior_to_facets=self.include_points_interior_to_facets,
@@ -459,6 +538,7 @@ class CYRandomRolloutEngine:
     def _register_node(self, *, key: str, point_config_index: int, simplices: CanonicalSimplices) -> Tuple[CYGraphNode, bool]:
         node = self.nodes_by_key.get(key)
         if node is not None:
+            self.nodes_by_key.move_to_end(key)
             return node, False
 
         node = CYGraphNode(
@@ -468,7 +548,83 @@ class CYRandomRolloutEngine:
         )
         self.nodes_by_key[node.key] = node
         self.graph_by_polytope.setdefault(node.point_config_index, {})[node.key] = node
-        return node, True
+        if self.history is not None:
+            is_new = self._discovered_keys.add(node.key)
+        else:
+            is_new = node.key not in self._discovered_keys
+            self._discovered_keys.add(node.key)
+        if is_new:
+            self._polytope_totals.setdefault(node.point_config_index, {"nodes": 0, "edges": 0, "expanded_nodes": 0})["nodes"] += 1
+        self._account_node(node)
+        return node, is_new
+
+    def _account_node(self, node):
+        size = retained_size(node)
+        self._graph_bytes += size - self._node_sizes.get(node.key, 0)
+        self._node_sizes[node.key] = size
+
+    def prune_runtime_caches(self, keep_keys=(), *, pressure=False):
+        protected = set(keep_keys) | self._active_keys
+        limit_bytes = 0 if pressure else self._graph_max_bytes
+        limit_entries = 0 if pressure else self._graph_max_entries
+        examined = 0
+        while self.nodes_by_key and (self._graph_bytes > limit_bytes or len(self.nodes_by_key) > limit_entries):
+            if examined >= len(self.nodes_by_key):
+                break
+            key = next(iter(self.nodes_by_key))
+            if key in protected:
+                self.nodes_by_key.move_to_end(key)
+                examined += 1
+                continue
+            node = self.nodes_by_key.pop(key)
+            self._graph_bytes -= self._node_sizes.pop(key, 0)
+            group = self.graph_by_polytope[node.point_config_index]
+            group.pop(key, None)
+            if not group:
+                self.graph_by_polytope.pop(node.point_config_index, None)
+            self._graph_evictions += 1
+        if pressure:
+            self.state_cache.hot_states.clear()
+            self._objective_cache.clear()
+
+    def memory_stats(self):
+        return {"resident_graph_nodes": len(self.nodes_by_key),
+                "resident_graph_edges": sum(len(node.transitions) for node in self.nodes_by_key.values()),
+                "resident_graph_bytes": self._graph_bytes,
+                "graph_evictions": self._graph_evictions,
+                "hot_state_bytes": self.state_cache.hot_states.bytes,
+                "objective_cache_bytes": self._objective_cache.bytes}
+
+    def release_active_states(self):
+        self._active_keys.clear()
+        self.prune_runtime_caches()
+
+    def objective_value(self, state, name):
+        if name in ("min_tri", "max_tri"):
+            return float(len(state.simplices))
+        cache_key = (name, state.key)
+        cached = self._objective_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        pool = self.transition_pool
+        if pool is None:
+            raise RuntimeError("Geometry objective requires a managed transition pool.")
+        result = next(pool.imap(execute_geometry_request, [{"operation": "objective",
+            "configuration": state.configuration, "state": state.to_payload(), "reward_name": name}]))
+        self._objective_cache[cache_key] = float(result)
+        return float(result)
+
+    def close(self):
+        for state in self.base_states.values():
+            if isinstance(state, CyStateRecord):
+                state.bind_objective_provider(None)
+        self.state_cache.hot_states.clear()
+        if self.history is not None:
+            self.history.close()
+            self.history = None
+        if self._owned_collection is not None:
+            self._owned_collection.close()
+            self._owned_collection = None
 
     def _register_state_node(self, state: Any) -> Tuple[CYGraphNode, bool]:
         return self._register_node(
@@ -487,14 +643,31 @@ class CYRandomRolloutEngine:
         node.ambiguous_actions = expansion.ambiguous_actions
         node.transitions = {action: transition for action, transition in expansion.transitions}
         node.expanded = True
+        first_expansion = (self._expanded_keys.add(node.key) if self.history is not None
+                           else node.key not in self._expanded_keys)
+        if first_expansion:
+            if self.history is None:
+                self._expanded_keys.add(node.key)
+            self._cumulative_edges += len(node.transitions)
+            if node.key in self.base_states:
+                self._base_edges += len(node.transitions)
+            totals = self._polytope_totals.setdefault(node.point_config_index, {"nodes": 0, "edges": 0, "expanded_nodes": 0})
+            totals["edges"] += len(node.transitions)
+            totals["expanded_nodes"] += 1
+        self._account_node(node)
 
         discovered = 0
         for transition in node.transitions.values():
-            _, is_new = self._register_node(
-                key=transition.next_key,
-                point_config_index=expansion.point_config_index,
-                simplices=transition.next_simplices,
-            )
+            if self._managed:
+                is_new = self._discovered_keys.add(transition.next_key)
+                if is_new:
+                    self._polytope_totals[expansion.point_config_index]["nodes"] += 1
+            else:
+                _, is_new = self._register_node(
+                    key=transition.next_key,
+                    point_config_index=expansion.point_config_index,
+                    simplices=transition.simplices_from(expansion.simplices),
+                )
             discovered += int(is_new)
         return discovered
 
@@ -514,6 +687,21 @@ class CYRandomRolloutEngine:
         register_runtime_state(self.state_cache, state)
         return state
 
+    def materialize_transition(self, source, transition):
+        cached = self.get_state(transition.next_key)
+        if cached is not None:
+            return cached
+        simplices = transition.simplices_from(source.simplices)
+        state = self.state_factory(source.point_config_index, simplices)
+        if isinstance(state, CyStateRecord):
+            state.is_target = bool(transition.next_is_target)
+            state.is_frst = bool(transition.next_is_frst)
+            # Charge selected-state edges before admitting the materialized state.
+            state.edges
+        self._register_state_node(state)
+        register_runtime_state(self.state_cache, state)
+        return state
+
     def expand_states(
         self,
         states: Sequence[Any],
@@ -523,7 +711,10 @@ class CYRandomRolloutEngine:
         transition_mp_chunksize: int = 32,
         transition_mp_min_batch: int = 32,
     ) -> ExpandSummary:
-        global _CY_ROLLOUT_MP_DISABLED
+        pool = transition_pool or self.transition_pool
+        if pool is not None and hasattr(pool, "check_memory"):
+            pool.check_memory()
+        self._active_keys = {str(state.key) for state in states}
         unique_unexpanded: Dict[str, Any] = {}
         for state in states:
             self._register_state_node(state)
@@ -531,49 +722,38 @@ class CYRandomRolloutEngine:
                 unique_unexpanded.setdefault(str(state.key), state)
 
         if not unique_unexpanded:
+            self.prune_runtime_caches()
             return ExpandSummary(expanded_count=0, discovered_count=0, used_multiprocessing=False)
 
         pending_states = list(unique_unexpanded.values())
-        expansion_payloads = [
-            (state, self.reward_function is not None) for state in pending_states
-        ]
-        use_mp = (
-            bool(use_multiprocessing)
-            and not _CY_ROLLOUT_MP_DISABLED
-            and transition_pool is not None
-            and len(pending_states) >= max(1, int(transition_mp_min_batch))
-        )
-
-        if use_mp:
-            try:
-                expansion_outputs = transition_pool.map(
-                    _expand_cy_state_worker,
-                    expansion_payloads,
-                    chunksize=max(1, int(transition_mp_chunksize)),
-                )
-            except Exception as exc:
-                warnings.warn(
-                    "CY rollout multiprocessing disabled after transition pool failure; "
-                    "falling back to sequential expansion for the remainder of this process. "
-                    f"Original error: {exc!r}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                _CY_ROLLOUT_MP_DISABLED = True
-                expansion_outputs = [
-                    _expand_cy_state_worker(payload) for payload in expansion_payloads
-                ]
-                use_mp = False
+        if self._managed:
+            if pool is None:
+                raise RuntimeError("Managed states require a transition pool, including serial rollouts.")
+            self.transition_pool = pool
+            expansion_payloads = ({"operation": "expand", "configuration": state.configuration,
+                "state": state.to_payload(), "objective_mode": self.reward_function is not None,
+                "action_order": self.action_order}
+                for state in pending_states)
+            expansion_outputs = pool.imap(execute_geometry_request, expansion_payloads, chunksize=1)
+            use_mp = len(getattr(pool, "worker_pids", ())) > 1
         else:
-            expansion_outputs = [
-                _expand_cy_state_worker(payload) for payload in expansion_payloads
-            ]
+            expansion_payloads = ((state, self.reward_function is not None) for state in pending_states)
+            use_mp = bool(use_multiprocessing) and pool is not None and len(pending_states) >= max(1, int(transition_mp_min_batch))
+            if use_mp:
+                # Infrastructure errors must not leave a pool alive and repeat its
+                # in-flight work inside the trainer.
+                mapper = getattr(pool, "imap", pool.map)
+                expansion_outputs = mapper(_expand_cy_state_worker, expansion_payloads, chunksize=1)
+            else:
+                expansion_outputs = map(_expand_cy_state_worker, expansion_payloads)
 
-        discovered = 0
+        discovered = expanded_count = 0
         for expansion in expansion_outputs:
             discovered += self._store_expansion(expansion)
+            expanded_count += 1
+            self.prune_runtime_caches()
         return ExpandSummary(
-            expanded_count=len(expansion_outputs),
+            expanded_count=expanded_count,
             discovered_count=discovered,
             used_multiprocessing=use_mp,
         )
@@ -593,8 +773,15 @@ class CYRandomRolloutEngine:
         **expand_kwargs: Any,
     ) -> List[Any]:
         source_states = self.initial_states if states is None else list(states)
-        action_lists, _summary = self.candidate_actions_for_states(source_states, **expand_kwargs)
-        return [state for state, actions in zip(source_states, action_lists) if len(actions) > 0]
+        actionable = []
+        chunk_size = min(128, self._graph_max_entries)
+        for start in range(0, len(source_states), chunk_size):
+            chunk = source_states[start:start + chunk_size]
+            action_lists, _summary = self.candidate_actions_for_states(chunk, **expand_kwargs)
+            actionable.extend(state for state, actions in zip(chunk, action_lists) if actions)
+        self._active_keys.clear()
+        self.prune_runtime_caches()
+        return actionable
 
     def sample_initial_states(
         self,
@@ -610,30 +797,19 @@ class CYRandomRolloutEngine:
         return [pool[int(idx)] for idx in indices]
 
     def graph_node_count(self) -> int:
-        return len(self.nodes_by_key)
+        return len(self._discovered_keys)
 
     def runtime_graph_node_count(self) -> int:
-        return sum(int(key not in self.base_states) for key in self.nodes_by_key)
+        return self.graph_node_count() - len(self.base_states)
 
     def graph_edge_count(self) -> int:
-        return sum(len(node.transitions) for node in self.nodes_by_key.values())
+        return self._cumulative_edges
 
     def runtime_graph_edge_count(self) -> int:
-        return sum(
-            len(node.transitions)
-            for key, node in self.nodes_by_key.items()
-            if key not in self.base_states
-        )
+        return self._cumulative_edges - self._base_edges
 
     def graph_stats_by_polytope(self) -> Dict[int, Dict[str, int]]:
-        stats: Dict[int, Dict[str, int]] = {}
-        for polytope_index, nodes in self.graph_by_polytope.items():
-            stats[polytope_index] = {
-                "nodes": len(nodes),
-                "edges": sum(len(node.transitions) for node in nodes.values()),
-                "expanded_nodes": sum(int(node.expanded) for node in nodes.values()),
-            }
-        return stats
+        return {index: dict(values) for index, values in self._polytope_totals.items()}
 
     def compact_runtime_graph_to_base(self) -> Dict[str, int]:
         base_keys = set(self.base_states.keys())
@@ -646,6 +822,7 @@ class CYRandomRolloutEngine:
             removed_nodes += 1
             removed_edges += len(node.transitions)
             self.nodes_by_key.pop(key, None)
+            self._graph_bytes -= self._node_sizes.pop(key, 0)
             poly_graph = self.graph_by_polytope.get(node.point_config_index)
             if poly_graph is not None:
                 poly_graph.pop(key, None)
@@ -653,17 +830,18 @@ class CYRandomRolloutEngine:
                     self.graph_by_polytope.pop(node.point_config_index, None)
 
         self.state_cache.hot_states.clear()
-        self.state_cache.runtime_unique_keys.clear()
+        # Discovery/visitation history deliberately survives graph compaction.
         for state in self.base_states.values():
             self._register_state_node(state)
+        self.prune_runtime_caches()
 
         return {
             "removed_nodes": removed_nodes,
             "removed_edges": removed_edges,
-            "remaining_nodes": self.graph_node_count(),
-            "remaining_runtime_nodes": self.runtime_graph_node_count(),
-            "remaining_edges": self.graph_edge_count(),
-            "remaining_runtime_edges": self.runtime_graph_edge_count(),
+            "remaining_nodes": len(self.nodes_by_key),
+            "remaining_runtime_nodes": sum(key not in self.base_states for key in self.nodes_by_key),
+            "remaining_edges": sum(len(node.transitions) for node in self.nodes_by_key.values()),
+            "remaining_runtime_edges": sum(len(node.transitions) for key, node in self.nodes_by_key.items() if key not in self.base_states),
         }
 
     def rollout_step(
@@ -720,7 +898,7 @@ class CYRandomRolloutEngine:
                 transitioned_states.append(state)
                 continue
 
-            if not objective_mode and len(transition.next_simplices) <= 1:
+            if not objective_mode and transition.num_next_simplices(state.simplices) <= 1:
                 rewards[idx] = -1.0
                 dones[idx] = True
                 terminal_reasons[idx] = "single_simplex"
@@ -728,7 +906,7 @@ class CYRandomRolloutEngine:
                 transitioned_states.append(state)
                 continue
 
-            next_state = self.materialize_state(transition.next_key)
+            next_state = self.materialize_transition(state, transition)
             transitioned_states.append(next_state)
             next_states[idx] = next_state
             if objective_mode:
@@ -739,9 +917,9 @@ class CYRandomRolloutEngine:
                 terminal_reasons[idx] = "frt_or_frst"
                 frt_hits += 1
                 continue
-            unique_nonterminal_next_keys.setdefault(str(next_state.key), None)
+            unique_nonterminal_next_keys.setdefault(str(next_state.key), next_state)
 
-        nonterminal_next_states = [self.materialize_state(key) for key in unique_nonterminal_next_keys]
+        nonterminal_next_states = list(unique_nonterminal_next_keys.values())
         next_expand_summary = self.expand_states(
             nonterminal_next_states,
             use_multiprocessing=use_multiprocessing,
@@ -783,12 +961,14 @@ class CYRandomRolloutEngine:
             expanded_states=expand_summary.expanded_count + next_expand_summary.expanded_count,
             discovered_states=expand_summary.discovered_count + next_expand_summary.discovered_count,
             used_multiprocessing=expand_summary.used_multiprocessing or next_expand_summary.used_multiprocessing,
+            candidate_actions=action_lists,
         )
 
 
 def get_rollout_memory_stats(engine: CYRandomRolloutEngine) -> Dict[str, int]:
     shared_sizes = get_cy_shared_cache_sizes()
     return {
+        **engine.memory_stats(),
         "graph_nodes": engine.graph_node_count(),
         "runtime_graph_nodes": engine.runtime_graph_node_count(),
         "graph_edges": engine.graph_edge_count(),
@@ -811,7 +991,7 @@ def maybe_compact_rollout_memory(
     before = get_rollout_memory_stats(engine)
     compacted_graph = False
     if graph_max_nodes is not None and int(graph_max_nodes) > 0:
-        compacted_graph = engine.runtime_graph_node_count() > int(graph_max_nodes)
+        compacted_graph = sum(key not in engine.base_states for key in engine.nodes_by_key) > int(graph_max_nodes)
         if compacted_graph:
             engine.compact_runtime_graph_to_base()
 

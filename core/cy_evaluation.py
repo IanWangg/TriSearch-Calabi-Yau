@@ -1,0 +1,919 @@
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, List, Sequence
+
+import numpy as np
+import torch
+
+from core.cy_data_utils import infer_dataset_coordinate_dim, mean_vertex_count, resolve_policy_in_channels
+from core.cy_evaluation_config import (
+    managed_rollout_runtime,
+    normalize_polytope_indices,
+    resolve_dataset_split,
+    resolve_eval_vertex_preprocessor,
+)
+from core.cy_policy_rollout_utils import (
+    format_rollout_summary,
+    increment_visitation,
+    rollout_return_statistics,
+)
+from core.cy_runtime_utils import resolve_training_device, set_seeds
+from core.cy_training_config import (
+    validate_cy_volume_reward_transform_args,
+    validate_neighbor_mode_args,
+)
+from core.cy_training_runner import maybe_filter_initial_state_pool
+from core.training_types import FirstEpisodeTracker, PolicyRolloutSummary
+from core.vertex_preprocessing import normalize_preprocessing_mode
+from mdp.cy_rollout import (
+    CYRandomRolloutEngine,
+    build_cy_rollout_collection,
+    create_transition_pool,
+    get_rollout_memory_stats,
+    load_cy_sample_rows,
+    maybe_compact_rollout_memory,
+)
+from models.subcomplex_policy_config import (
+    DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
+    normalize_subcomplex_actor_type,
+    value_feature_source_for_subcomplex_actor,
+)
+from reward_functions import get_objective, get_reward, infer_goal
+
+if TYPE_CHECKING:
+    from models.egnn_subcomplex_predictor import EGNNSubcomplexAgent
+
+def rollout_step_with_policy(*args: Any, **kwargs: Any) -> Any:
+    from core.cy_policy_rollout_utils import rollout_step_with_policy as _rollout_step_with_policy
+
+    return _rollout_step_with_policy(*args, **kwargs)
+
+
+from core.cy_runtime_utils import load_policy_checkpoint  # noqa: E402,F401
+
+
+def _format_memory_stats(stats: dict[str, int]) -> str:
+    return (
+        f"graph_nodes={stats['graph_nodes']} "
+        f"runtime_graph_nodes={stats['runtime_graph_nodes']} "
+        f"graph_edges={stats['graph_edges']} "
+        f"cached_states={stats['cached_states']} "
+        f"hot_cache={stats['hot_cache']} "
+        f"shared_subcomplex={stats['shared_subcomplex']} "
+        f"shared_neighbour_flip={stats['shared_neighbour_flip']} "
+        f"shared_subcomplex_transition={stats['shared_subcomplex_transition']} "
+        f"shared_subcomplex_neighbour={stats['shared_subcomplex_neighbour']}"
+    )
+
+def attach_rollout_length_record(
+    summary: PolicyRolloutSummary,
+    rollout_lengths: Sequence[int],
+) -> PolicyRolloutSummary:
+    resolved_lengths = [int(length) for length in rollout_lengths]
+    summary.rollout_lengths = resolved_lengths
+    if resolved_lengths:
+        summary.rollout_length_mean = float(np.mean(resolved_lengths))
+        summary.rollout_length_min = int(min(resolved_lengths))
+        summary.rollout_length_max = int(max(resolved_lengths))
+    else:
+        summary.rollout_length_mean = 0.0
+        summary.rollout_length_min = 0
+        summary.rollout_length_max = 0
+    return summary
+
+
+def attach_objective_record(
+    summary: PolicyRolloutSummary,
+    *,
+    objective_name: str | None,
+    objective_goal: str | None,
+    initial_values: Sequence[float] | None,
+    final_values: Sequence[float] | None,
+    best_values: Sequence[float] | None,
+) -> PolicyRolloutSummary:
+    summary.objective_name = objective_name
+    summary.objective_goal = objective_goal
+    summary.objective_initial_values = (
+        None if initial_values is None else [float(value) for value in initial_values]
+    )
+    summary.objective_final_values = (
+        None if final_values is None else [float(value) for value in final_values]
+    )
+    summary.objective_best_values = (
+        None if best_values is None else [float(value) for value in best_values]
+    )
+    return summary
+
+
+def _updated_best_objective(goal: str, current_best: float, candidate: float) -> float:
+    if goal == "min":
+        return min(float(current_best), float(candidate))
+    if goal == "max":
+        return max(float(current_best), float(candidate))
+    raise ValueError(f"Unsupported objective goal '{goal}'.")
+
+
+def _objective_improvements(
+    goal: str,
+    initial_values: Sequence[float],
+    best_values: Sequence[float],
+) -> List[float]:
+    if goal == "min":
+        return [
+            float(initial) - float(best)
+            for initial, best in zip(initial_values, best_values)
+        ]
+    if goal == "max":
+        return [
+            float(best) - float(initial)
+            for initial, best in zip(initial_values, best_values)
+        ]
+    raise ValueError(f"Unsupported objective goal '{goal}'.")
+
+
+def collect_policy_rollout_over_initial_states(
+    *,
+    engine: CYRandomRolloutEngine,
+    policy: EGNNSubcomplexAgent,
+    rng: np.random.Generator,
+    device: torch.device,
+    initial_states: Sequence[Any],
+    rollout_length: int,
+    gamma: float,
+    deterministic: bool,
+    use_multiprocessing: bool,
+    transition_pool: Any,
+    transition_mp_chunksize: int,
+    transition_mp_min_batch: int,
+    report_every: int,
+    label: str,
+    vertex_preprocessor: VertexPreprocessor | None = None,
+    objective_function: Callable[[Any], float] | None = None,
+    objective_name: str | None = None,
+    objective_goal: str | None = None,
+) -> PolicyRolloutSummary:
+    full_initial_states = list(initial_states)
+    if not full_initial_states:
+        raise ValueError("initial_states must be non-empty.")
+
+    tracker = FirstEpisodeTracker.create(num_envs=len(full_initial_states), gamma=gamma)
+    active_states = list(full_initial_states)
+    active_indices = list(range(len(full_initial_states)))
+    final_states = list(full_initial_states)
+    rollout_lengths = np.zeros(len(full_initial_states), dtype=np.int64)
+    rollout_returns = np.zeros(len(full_initial_states), dtype=np.float64)
+    objective_initial_values = (
+        [float(objective_function(state)) for state in full_initial_states]
+        if objective_function is not None
+        else None
+    )
+    objective_final_values = (
+        None if objective_initial_values is None else list(objective_initial_values)
+    )
+    objective_best_values = (
+        None if objective_initial_values is None else list(objective_initial_values)
+    )
+    if objective_function is not None and objective_goal is None:
+        raise ValueError("objective_goal is required with objective_function.")
+
+    total_frt_hits = 0
+    total_collapsed_hits = 0
+    total_dead_end_hits = 0
+    total_expanded_states = 0
+    total_discovered_states = 0
+    total_mp_steps = 0
+    total_candidates = 0
+    total_valid_actions = 0
+    total_candidate_expand_sec = 0.0
+    total_policy_data_build_sec = 0.0
+    total_policy_batch_transfer_sec = 0.0
+    total_policy_value_inference_sec = 0.0
+    total_policy_action_inference_sec = 0.0
+    total_transition_apply_sec = 0.0
+
+    for step_index in range(int(rollout_length)):
+        if not active_states:
+            break
+
+        increment_visitation(active_states)
+        step_result = rollout_step_with_policy(
+            engine,
+            active_states,
+            policy,
+            rng=rng,
+            device=device,
+            initial_state_pool=full_initial_states,
+            deterministic=deterministic,
+            use_multiprocessing=use_multiprocessing,
+            transition_pool=transition_pool,
+            transition_mp_chunksize=transition_mp_chunksize,
+            transition_mp_min_batch=transition_mp_min_batch,
+            vertex_preprocessor=vertex_preprocessor,
+        )
+
+        full_rewards = np.zeros(len(full_initial_states), dtype=np.float64)
+        full_dones = np.zeros(len(full_initial_states), dtype=bool)
+        full_terminal_reasons = np.full(len(full_initial_states), "continue", dtype=object)
+
+        next_active_states: List[Any] = []
+        next_active_indices: List[int] = []
+        for local_idx, global_idx in enumerate(active_indices):
+            rollout_lengths[global_idx] = step_index + 1
+            full_rewards[global_idx] = float(step_result.rewards[local_idx])
+            full_dones[global_idx] = bool(step_result.dones[local_idx])
+            full_terminal_reasons[global_idx] = step_result.terminal_reasons[local_idx]
+
+            if objective_function is not None:
+                transitioned_state = step_result.transitioned_states[local_idx]
+                objective_value = float(objective_function(transitioned_state))
+                objective_final_values[global_idx] = objective_value
+                objective_best_values[global_idx] = _updated_best_objective(
+                    objective_goal,
+                    objective_best_values[global_idx],
+                    objective_value,
+                )
+
+            if step_result.dones[local_idx]:
+                final_states[global_idx] = step_result.transitioned_states[local_idx]
+            else:
+                next_state = step_result.next_states[local_idx]
+                final_states[global_idx] = next_state
+                next_active_states.append(next_state)
+                next_active_indices.append(global_idx)
+
+        tracker.update(
+            rewards=full_rewards,
+            dones=full_dones,
+            terminal_reasons=full_terminal_reasons,
+            step_index=step_index,
+        )
+        rollout_returns += full_rewards
+
+        active_states = next_active_states
+        active_indices = next_active_indices
+        total_frt_hits += int(step_result.frt_hits)
+        total_collapsed_hits += int(step_result.collapsed_hits)
+        total_dead_end_hits += int(step_result.dead_end_hits)
+        total_expanded_states += int(step_result.expanded_states)
+        total_discovered_states += int(step_result.discovered_states)
+        total_mp_steps += int(step_result.used_multiprocessing)
+        total_candidates += sum(len(actions) for actions in step_result.action_candidates)
+        total_valid_actions += int(step_result.valid_action_mask.sum().item())
+        total_candidate_expand_sec += float(step_result.candidate_expand_sec)
+        total_policy_data_build_sec += float(step_result.policy_data_build_sec)
+        total_policy_batch_transfer_sec += float(step_result.policy_batch_transfer_sec)
+        total_policy_value_inference_sec += float(step_result.policy_value_inference_sec)
+        total_policy_action_inference_sec += float(step_result.policy_action_inference_sec)
+        total_transition_apply_sec += float(step_result.transition_apply_sec)
+
+        should_report = report_every > 0 and (
+            step_index == 0
+            or (step_index + 1) % int(report_every) == 0
+            or (step_index + 1) == int(rollout_length)
+            or not active_states
+        )
+        if should_report:
+            step_reward = float(np.mean(step_result.rewards)) if step_result.rewards else 0.0
+            done_fraction = float(np.mean(step_result.dones)) if step_result.dones else 0.0
+            print(
+                f"{label} step={step_index + 1}/{rollout_length} "
+                f"reward_mean={step_reward:.4f} "
+                f"done_fraction={done_fraction:.4f} "
+                f"first_episode_finished={tracker.finished_fraction():.4f} "
+                f"active_states={len(active_states)}"
+            )
+
+    return_stats = rollout_return_statistics(rollout_returns)
+    summary = attach_rollout_length_record(
+        PolicyRolloutSummary(
+            final_states=final_states,
+            rollout_buffer=None,
+            success_rate=tracker.success_rate(),
+            discounted_reward=tracker.mean_discounted_reward(),
+            finished_fraction=tracker.finished_fraction(),
+            finished_count=tracker.finished_count(),
+            frt_hits=tracker.success_count(),
+            collapsed_hits=tracker.collapsed_count(),
+            dead_end_hits=tracker.dead_end_count(),
+            all_step_reset_count=0,
+            all_step_frt_hits=total_frt_hits,
+            all_step_collapsed_hits=total_collapsed_hits,
+            all_step_dead_end_hits=total_dead_end_hits,
+            expanded_states=total_expanded_states,
+            discovered_states=total_discovered_states,
+            multiprocessing_steps=total_mp_steps,
+            total_candidates=total_candidates,
+            total_valid_actions=total_valid_actions,
+            candidate_expand_sec=total_candidate_expand_sec,
+            policy_data_build_sec=total_policy_data_build_sec,
+            policy_batch_transfer_sec=total_policy_batch_transfer_sec,
+            policy_value_inference_sec=total_policy_value_inference_sec,
+            policy_action_inference_sec=total_policy_action_inference_sec,
+            transition_apply_sec=total_transition_apply_sec,
+            return_mean=return_stats["mean"],
+            return_std=return_stats["std"],
+            return_min=return_stats["min"],
+            return_max=return_stats["max"],
+            training_return_mean=return_stats["mean"],
+        ),
+        rollout_lengths=rollout_lengths.tolist(),
+    )
+    return attach_objective_record(
+        summary,
+        objective_name=objective_name,
+        objective_goal=objective_goal,
+        initial_values=objective_initial_values,
+        final_values=objective_final_values,
+        best_values=objective_best_values,
+    )
+
+
+def collect_random_rollout_over_initial_states(
+    *,
+    engine: CYRandomRolloutEngine,
+    rng: np.random.Generator,
+    initial_states: Sequence[Any],
+    rollout_length: int,
+    gamma: float,
+    use_multiprocessing: bool,
+    transition_pool: Any,
+    transition_mp_chunksize: int,
+    transition_mp_min_batch: int,
+    report_every: int,
+    label: str,
+    objective_function: Callable[[Any], float] | None = None,
+    objective_name: str | None = None,
+    objective_goal: str | None = None,
+) -> PolicyRolloutSummary:
+    full_initial_states = list(initial_states)
+    if not full_initial_states:
+        raise ValueError("initial_states must be non-empty.")
+
+    tracker = FirstEpisodeTracker.create(num_envs=len(full_initial_states), gamma=gamma)
+    active_states = list(full_initial_states)
+    active_indices = list(range(len(full_initial_states)))
+    final_states = list(full_initial_states)
+    rollout_lengths = np.zeros(len(full_initial_states), dtype=np.int64)
+    rollout_returns = np.zeros(len(full_initial_states), dtype=np.float64)
+    objective_initial_values = (
+        [float(objective_function(state)) for state in full_initial_states]
+        if objective_function is not None
+        else None
+    )
+    objective_final_values = (
+        None if objective_initial_values is None else list(objective_initial_values)
+    )
+    objective_best_values = (
+        None if objective_initial_values is None else list(objective_initial_values)
+    )
+    if objective_function is not None and objective_goal is None:
+        raise ValueError("objective_goal is required with objective_function.")
+
+    total_frt_hits = 0
+    total_collapsed_hits = 0
+    total_dead_end_hits = 0
+    total_expanded_states = 0
+    total_discovered_states = 0
+    total_mp_steps = 0
+    total_candidates = 0
+    total_valid_actions = 0
+
+    for step_index in range(int(rollout_length)):
+        if not active_states:
+            break
+
+        increment_visitation(active_states)
+        step_result = engine.rollout_step(
+            active_states,
+            rng=rng,
+            initial_state_pool=full_initial_states,
+            use_multiprocessing=use_multiprocessing,
+            transition_pool=transition_pool,
+            transition_mp_chunksize=transition_mp_chunksize,
+            transition_mp_min_batch=transition_mp_min_batch,
+        )
+
+        action_lists = getattr(step_result, "candidate_actions", None)
+        if action_lists is None:
+            # Compatibility with external engines predating step snapshots.
+            action_lists = [
+                engine.nodes_by_key[str(state.key)].candidate_actions
+                for state in step_result.input_states
+            ]
+
+        full_rewards = np.zeros(len(full_initial_states), dtype=np.float64)
+        full_dones = np.zeros(len(full_initial_states), dtype=bool)
+        full_terminal_reasons = np.full(len(full_initial_states), "continue", dtype=object)
+
+        next_active_states: List[Any] = []
+        next_active_indices: List[int] = []
+        for local_idx, global_idx in enumerate(active_indices):
+            rollout_lengths[global_idx] = step_index + 1
+            full_rewards[global_idx] = float(step_result.rewards[local_idx])
+            full_dones[global_idx] = bool(step_result.dones[local_idx])
+            full_terminal_reasons[global_idx] = step_result.terminal_reasons[local_idx]
+
+            if objective_function is not None:
+                transitioned_state = step_result.transitioned_states[local_idx]
+                objective_value = float(objective_function(transitioned_state))
+                objective_final_values[global_idx] = objective_value
+                objective_best_values[global_idx] = _updated_best_objective(
+                    objective_goal,
+                    objective_best_values[global_idx],
+                    objective_value,
+                )
+
+            if step_result.dones[local_idx]:
+                final_states[global_idx] = step_result.transitioned_states[local_idx]
+            else:
+                next_state = step_result.next_states[local_idx]
+                final_states[global_idx] = next_state
+                next_active_states.append(next_state)
+                next_active_indices.append(global_idx)
+
+        tracker.update(
+            rewards=full_rewards,
+            dones=full_dones,
+            terminal_reasons=full_terminal_reasons,
+            step_index=step_index,
+        )
+        rollout_returns += full_rewards
+
+        active_states = next_active_states
+        active_indices = next_active_indices
+        total_frt_hits += int(step_result.frt_hits)
+        total_collapsed_hits += int(step_result.collapsed_hits)
+        total_dead_end_hits += int(step_result.dead_end_hits)
+        total_expanded_states += int(step_result.expanded_states)
+        total_discovered_states += int(step_result.discovered_states)
+        total_mp_steps += int(step_result.used_multiprocessing)
+        total_candidates += sum(len(actions) for actions in action_lists)
+        total_valid_actions += sum(int(len(actions) > 0) for actions in action_lists)
+
+        should_report = report_every > 0 and (
+            step_index == 0
+            or (step_index + 1) % int(report_every) == 0
+            or (step_index + 1) == int(rollout_length)
+            or not active_states
+        )
+        if should_report:
+            step_reward = float(np.mean(step_result.rewards)) if step_result.rewards else 0.0
+            done_fraction = float(np.mean(step_result.dones)) if step_result.dones else 0.0
+            print(
+                f"{label} step={step_index + 1}/{rollout_length} "
+                f"reward_mean={step_reward:.4f} "
+                f"done_fraction={done_fraction:.4f} "
+                f"first_episode_finished={tracker.finished_fraction():.4f} "
+                f"active_states={len(active_states)}"
+            )
+
+    return_stats = rollout_return_statistics(rollout_returns)
+    summary = attach_rollout_length_record(
+        PolicyRolloutSummary(
+            final_states=final_states,
+            rollout_buffer=None,
+            success_rate=tracker.success_rate(),
+            discounted_reward=tracker.mean_discounted_reward(),
+            finished_fraction=tracker.finished_fraction(),
+            finished_count=tracker.finished_count(),
+            frt_hits=tracker.success_count(),
+            collapsed_hits=tracker.collapsed_count(),
+            dead_end_hits=tracker.dead_end_count(),
+            all_step_reset_count=0,
+            all_step_frt_hits=total_frt_hits,
+            all_step_collapsed_hits=total_collapsed_hits,
+            all_step_dead_end_hits=total_dead_end_hits,
+            expanded_states=total_expanded_states,
+            discovered_states=total_discovered_states,
+            multiprocessing_steps=total_mp_steps,
+            total_candidates=total_candidates,
+            total_valid_actions=total_valid_actions,
+            candidate_expand_sec=0.0,
+            policy_data_build_sec=0.0,
+            policy_batch_transfer_sec=0.0,
+            policy_value_inference_sec=0.0,
+            policy_action_inference_sec=0.0,
+            transition_apply_sec=0.0,
+            return_mean=return_stats["mean"],
+            return_std=return_stats["std"],
+            return_min=return_stats["min"],
+            return_max=return_stats["max"],
+            training_return_mean=return_stats["mean"],
+        ),
+        rollout_lengths=rollout_lengths.tolist(),
+    )
+    return attach_objective_record(
+        summary,
+        objective_name=objective_name,
+        objective_goal=objective_goal,
+        initial_values=objective_initial_values,
+        final_values=objective_final_values,
+        best_values=objective_best_values,
+    )
+
+
+def build_summary_payload(
+    *,
+    checkpoint_path: str | None,
+    policy_mode: str,
+    preprocessing: str,
+    device: torch.device,
+    eval_initial_states: Sequence[Any],
+    eval_polytope_indices: Sequence[int],
+    eval_summary: PolicyRolloutSummary,
+    eval_steps: int,
+    eval_sec: float,
+    eval_mean_vertices: float,
+    graph_node_count: int,
+    graph_edge_count: int,
+    cached_states: int,
+    hot_cache_size: int,
+    shared_cache_sizes: dict[str, int],
+) -> dict[str, Any]:
+    rollout_lengths = [int(length) for length in getattr(eval_summary, "rollout_lengths", ())]
+    rollout_length_mean = float(getattr(eval_summary, "rollout_length_mean", 0.0))
+    rollout_length_min = int(getattr(eval_summary, "rollout_length_min", 0))
+    rollout_length_max = int(getattr(eval_summary, "rollout_length_max", 0))
+    payload = {
+        "checkpoint_path": checkpoint_path,
+        "policy_mode": policy_mode,
+        "preprocessing": normalize_preprocessing_mode(preprocessing),
+        "device": str(device),
+        "eval_initial_states": len(eval_initial_states),
+        "eval_polytopes": len(eval_polytope_indices),
+        "eval_polytope_indices": [int(index) for index in eval_polytope_indices],
+        "eval_mean_vertices": float(eval_mean_vertices),
+        "eval_steps": int(eval_steps),
+        "rollout_lengths": rollout_lengths,
+        "rollout_length_mean": rollout_length_mean,
+        "rollout_length_min": rollout_length_min,
+        "rollout_length_max": rollout_length_max,
+        "eval_sec": float(eval_sec),
+        "graph_node_count": int(graph_node_count),
+        "graph_edge_count": int(graph_edge_count),
+        "cached_states": int(cached_states),
+        "hot_cache_size": int(hot_cache_size),
+        "shared_cache_sizes": {
+            "subcomplex": int(shared_cache_sizes["subcomplex"]),
+            "neighbour_flip": int(shared_cache_sizes["neighbour_flip"]),
+            "subcomplex_transition": int(shared_cache_sizes["subcomplex_transition"]),
+            "subcomplex_neighbour": int(shared_cache_sizes["subcomplex_neighbour"]),
+        },
+        "success_rate": float(eval_summary.success_rate),
+        "return_mean": float(eval_summary.return_mean),
+        "return_std": float(eval_summary.return_std),
+        "return_min": float(eval_summary.return_min),
+        "return_max": float(eval_summary.return_max),
+        "discounted_reward": float(eval_summary.discounted_reward),
+        "finished_fraction": float(eval_summary.finished_fraction),
+        "finished_count": int(eval_summary.finished_count),
+        "frt_hits": int(eval_summary.frt_hits),
+        "collapsed_hits": int(eval_summary.collapsed_hits),
+        "dead_end_hits": int(eval_summary.dead_end_hits),
+        "all_step_resets": int(eval_summary.all_step_reset_count),
+        "all_step_frt_hits": int(eval_summary.all_step_frt_hits),
+        "all_step_collapsed_hits": int(eval_summary.all_step_collapsed_hits),
+        "all_step_dead_end_hits": int(eval_summary.all_step_dead_end_hits),
+        "expanded_states": int(eval_summary.expanded_states),
+        "discovered_states": int(eval_summary.discovered_states),
+        "multiprocessing_steps": int(eval_summary.multiprocessing_steps),
+        "total_candidates": int(eval_summary.total_candidates),
+        "total_valid_actions": int(eval_summary.total_valid_actions),
+        "candidate_expand_sec": float(eval_summary.candidate_expand_sec),
+        "policy_data_build_sec": float(eval_summary.policy_data_build_sec),
+        "policy_batch_transfer_sec": float(eval_summary.policy_batch_transfer_sec),
+        "policy_value_inference_sec": float(eval_summary.policy_value_inference_sec),
+        "policy_action_inference_sec": float(eval_summary.policy_action_inference_sec),
+        "transition_apply_sec": float(eval_summary.transition_apply_sec),
+    }
+    if eval_summary.objective_name is not None:
+        initial_values = list(eval_summary.objective_initial_values or ())
+        final_values = list(eval_summary.objective_final_values or ())
+        best_values = list(eval_summary.objective_best_values or ())
+        if not (len(initial_values) == len(final_values) == len(best_values)):
+            raise ValueError("Objective metric arrays must have equal lengths.")
+
+        improvements = _objective_improvements(
+            eval_summary.objective_goal,
+            initial_values,
+            best_values,
+        )
+
+        payload["objective"] = {
+            "name": eval_summary.objective_name,
+            "goal": eval_summary.objective_goal,
+            "initial_values": initial_values,
+            "final_values": final_values,
+            "best_values": best_values,
+            "initial_mean": float(np.mean(initial_values)) if initial_values else 0.0,
+            "final_mean": float(np.mean(final_values)) if final_values else 0.0,
+            "best_mean": float(np.mean(best_values)) if best_values else 0.0,
+            "mean_improvement": float(np.mean(improvements)) if improvements else 0.0,
+            "improved_fraction": (
+                float(np.mean(np.asarray(improvements) > 0.0)) if improvements else 0.0
+            ),
+        }
+    return payload
+
+
+def main(args: argparse.Namespace) -> None:
+    with managed_rollout_runtime(args, create_transition_pool) as runtime:
+        _run_evaluation(args, *runtime)
+
+
+def _run_evaluation(args, transition_pool, cache_budget_bytes, register_engine) -> None:
+    set_seeds(args.seed)
+    validate_neighbor_mode_args(args)
+    validate_cy_volume_reward_transform_args(args)
+    reward_function = (
+        get_reward(
+            args.reward_function,
+            cy_volume_reward_transform=args.cy_volume_reward_transform,
+        )
+        if args.reward_function is not None
+        else None
+    )
+    objective_function = (
+        get_objective(args.reward_function, reward=reward_function)
+        if args.reward_function is not None
+        else None
+    )
+    objective_goal = (
+        infer_goal(args.reward_function) if args.reward_function is not None else None
+    )
+    if reward_function is None:
+        print("Using CY sampling reward.")
+    else:
+        print(
+            f"Using triangulation objective: reward={args.reward_function} "
+            f"goal={objective_goal} "
+            f"cy_volume_reward_transform={args.cy_volume_reward_transform}"
+        )
+    resolved_preprocessing = normalize_preprocessing_mode(args.preprocessing)
+    vertex_preprocessor = resolve_eval_vertex_preprocessor(
+        random_policy=bool(args.random),
+        preprocessing=resolved_preprocessing,
+    )
+    if args.random:
+        device = torch.device("cpu")
+        checkpoint_path = None
+        print("Using uniformly random policy.")
+    else:
+        from models.subcomplex_policy_factory import build_subcomplex_agent
+
+        if args.checkpoint_path is None:
+            raise ValueError("--checkpoint_path is required unless --random is set.")
+        device = resolve_training_device(gpu_index=args.gpu_index, force_cpu=bool(args.force_cpu))
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        print(f"Using evaluation device: {device}")
+
+        checkpoint_path = str(Path(args.checkpoint_path).expanduser())
+        if not Path(checkpoint_path).exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    dataset_path = str(Path(args.dataset_path).expanduser())
+    print(f"Loading CY dataset from {dataset_path}")
+    rows = load_cy_sample_rows(dataset_path, max_rows=args.max_rows)
+    dataset_coordinate_dim = infer_dataset_coordinate_dim(rows)
+    split = resolve_dataset_split(
+        rows,
+        num_eval_polytopes=args.num_eval_polytopes,
+        polytope_indices=args.polytope_indices,
+    )
+    print(
+        "Dataset split: "
+        f"train_polytopes={len(split.train_polytope_indices)} "
+        f"eval_polytopes={len(split.eval_polytope_indices)} "
+        f"coord_dim={dataset_coordinate_dim} "
+        f"preprocessing={resolved_preprocessing} "
+        f"train_mean_vertices={mean_vertex_count(split.train_rows):.2f} "
+        f"eval_mean_vertices={mean_vertex_count(split.eval_rows):.2f}"
+    )
+    if args.polytope_indices is None:
+        print(
+            "Using eval polytopes selected by "
+            f"--num_eval_polytopes={int(args.num_eval_polytopes)}: {split.eval_polytope_indices}"
+        )
+    else:
+        selected_eval_indices = normalize_polytope_indices(args.polytope_indices)
+        print(
+            f"Using explicit eval polytope indices: {selected_eval_indices}"
+        )
+
+    build_start = time.perf_counter()
+    eval_collection = build_cy_rollout_collection(
+        split.eval_rows,
+        include_points_interior_to_facets=args.include_points_interior_to_facets,
+        neighbor_mode=args.neighbor_mode,
+        transition_pool=transition_pool,
+    )
+    build_sec = time.perf_counter() - build_start
+    print(
+        "Built CY eval collection: "
+        f"eval_initial_states={len(eval_collection.initial_states)} "
+        f"time={build_sec:.2f}s"
+    )
+
+    eval_engine = CYRandomRolloutEngine(
+        collection=eval_collection,
+        include_points_interior_to_facets=args.include_points_interior_to_facets,
+        state_cache_mode=args.state_cache_mode,
+        max_hot_states=args.max_hot_states,
+        reward_function=reward_function,
+        neighbor_mode=args.neighbor_mode,
+        transition_pool=transition_pool,
+        cache_budget_bytes=cache_budget_bytes,
+    )
+    register_engine(eval_engine)
+    policy = None
+    if not args.random:
+        resolved_in_channels = resolve_policy_in_channels(rows, args.in_channels)
+        subcomplex_actor_type = normalize_subcomplex_actor_type(
+            getattr(args, "subcomplex_actor_type", DEFAULT_SUBCOMPLEX_ACTOR_TYPE)
+        )
+        value_feature_source = value_feature_source_for_subcomplex_actor(subcomplex_actor_type)
+        policy = build_subcomplex_agent(
+            model_type="egnn",
+            in_channels=resolved_in_channels,
+            out_channels=args.out_channels,
+            hidden_channels=args.hidden_channels,
+            num_layers=args.num_layers,
+            share_encoder=True,
+            mlp_hidden_channel_list=[64],
+            act="silu",
+            subcomplex_actor_type=subcomplex_actor_type,
+            device=str(device),
+        ).to(device)
+        load_policy_checkpoint(policy, checkpoint_path, map_location=device)
+        print(f"Using policy in_channels={resolved_in_channels}")
+        print(f"Using subcomplex_actor_type={subcomplex_actor_type}")
+        print(f"Using value_feature_source={value_feature_source}")
+        print(f"Loaded checkpoint: {checkpoint_path}")
+        if vertex_preprocessor is not None:
+            print(f"Applying eval preprocessing: {vertex_preprocessor.mode}")
+
+    if args.use_multiprocessing:
+        print(
+            "Managed geometry workers: "
+            f"workers={transition_pool.num_workers}, "
+            f"start_method={args.transition_mp_start_method}, "
+            f"chunksize={args.transition_mp_chunksize}, "
+            f"min_batch={args.transition_mp_min_batch}"
+        )
+
+    try:
+        eval_initial_state_pool = maybe_filter_initial_state_pool(
+            engine=eval_engine,
+            initial_state_pool=eval_collection.initial_states,
+            use_filter=bool(args.filter_actionable_initial_states),
+            use_multiprocessing=bool(args.use_multiprocessing),
+            transition_pool=transition_pool,
+            transition_mp_chunksize=int(args.transition_mp_chunksize),
+            transition_mp_min_batch=int(args.transition_mp_min_batch),
+            label="Eval",
+        )
+        print(f"Evaluating on {len(eval_initial_state_pool)} eval initial states.")
+
+        memory_guard = maybe_compact_rollout_memory(
+            eval_engine,
+            graph_max_nodes=int(args.graph_max_nodes),
+            shared_cache_max_entries=int(args.shared_cache_max_entries),
+        )
+        if memory_guard["compacted_graph"] or memory_guard["pruned_shared"]:
+            before = memory_guard["before"]
+            after = memory_guard["after"]
+            print(
+                "Eval memory_guard "
+                f"compacted_graph={memory_guard['compacted_graph']} "
+                f"pruned_shared={memory_guard['pruned_shared']} "
+                f"runtime_graph_nodes={before['runtime_graph_nodes']}->{after['runtime_graph_nodes']} "
+                f"cached_states={before['cached_states']}->{after['cached_states']} "
+                f"hot_cache={before['hot_cache']}->{after['hot_cache']} "
+                f"shared_subcomplex={before['shared_subcomplex']}->{after['shared_subcomplex']}"
+            )
+
+        eval_start = time.perf_counter()
+        if args.random:
+            eval_summary = collect_random_rollout_over_initial_states(
+                engine=eval_engine,
+                rng=np.random.default_rng(args.seed + 100000),
+                initial_states=eval_initial_state_pool,
+                rollout_length=int(args.eval_steps),
+                gamma=float(args.gamma),
+                use_multiprocessing=bool(args.use_multiprocessing),
+                transition_pool=transition_pool,
+                transition_mp_chunksize=int(args.transition_mp_chunksize),
+                transition_mp_min_batch=int(args.transition_mp_min_batch),
+                report_every=int(args.report_every),
+                label="eval",
+                objective_function=objective_function,
+                objective_name=args.reward_function,
+                objective_goal=objective_goal,
+            )
+        else:
+            policy.eval()
+            eval_summary = collect_policy_rollout_over_initial_states(
+                engine=eval_engine,
+                policy=policy,
+                rng=np.random.default_rng(args.seed + 100000),
+                device=device,
+                initial_states=eval_initial_state_pool,
+                rollout_length=int(args.eval_steps),
+                gamma=float(args.gamma),
+                deterministic=bool(args.deterministic_eval),
+                use_multiprocessing=bool(args.use_multiprocessing),
+                transition_pool=transition_pool,
+                transition_mp_chunksize=int(args.transition_mp_chunksize),
+                transition_mp_min_batch=int(args.transition_mp_min_batch),
+                report_every=int(args.report_every),
+                label="eval",
+                vertex_preprocessor=vertex_preprocessor,
+                objective_function=objective_function,
+                objective_name=args.reward_function,
+                objective_goal=objective_goal,
+            )
+        eval_sec = time.perf_counter() - eval_start
+
+        print(
+            format_rollout_summary(
+                label="Eval",
+                summary=eval_summary,
+                num_envs=len(eval_initial_state_pool),
+                rollout_length=int(args.eval_steps),
+            )
+        )
+        print(
+            "Rollout length: "
+            f"mean={float(getattr(eval_summary, 'rollout_length_mean', 0.0)):.2f} "
+            f"min={int(getattr(eval_summary, 'rollout_length_min', 0))} "
+            f"max={int(getattr(eval_summary, 'rollout_length_max', 0))}"
+        )
+        if eval_summary.objective_name is not None:
+            initial_values = eval_summary.objective_initial_values or []
+            final_values = eval_summary.objective_final_values or []
+            best_values = eval_summary.objective_best_values or []
+            improvements = _objective_improvements(
+                eval_summary.objective_goal,
+                initial_values,
+                best_values,
+            )
+            print(
+                "Objective: "
+                f"name={eval_summary.objective_name} "
+                f"goal={eval_summary.objective_goal} "
+                f"initial_mean={float(np.mean(initial_values)):.4f} "
+                f"final_mean={float(np.mean(final_values)):.4f} "
+                f"best_mean={float(np.mean(best_values)):.4f} "
+                f"mean_improvement={float(np.mean(improvements)):.4f}"
+            )
+        print(
+            "System: "
+            f"{_format_memory_stats(get_rollout_memory_stats(eval_engine))} "
+            f"eval_sec={eval_sec:.2f}"
+        )
+        resident_memory = eval_engine.memory_stats()
+        owned_memory = transition_pool.memory_snapshot
+        print(
+            f"Managed runtime: workers={transition_pool.num_workers} "
+            f"owned_rss_gb={owned_memory.get('rss_bytes', 0) / 1024**3:.2f} "
+            f"resident_graph_nodes={resident_memory['resident_graph_nodes']} "
+            f"graph_evictions={resident_memory['graph_evictions']}"
+        )
+
+        if args.summary_path is not None:
+            memory_stats = get_rollout_memory_stats(eval_engine)
+            payload = build_summary_payload(
+                checkpoint_path=checkpoint_path,
+                policy_mode="random" if args.random else "policy",
+                preprocessing=resolved_preprocessing,
+                device=device,
+                eval_initial_states=eval_initial_state_pool,
+                eval_polytope_indices=split.eval_polytope_indices,
+                eval_summary=eval_summary,
+                eval_steps=int(args.eval_steps),
+                eval_sec=eval_sec,
+                eval_mean_vertices=mean_vertex_count(split.eval_rows),
+                graph_node_count=eval_engine.graph_node_count(),
+                graph_edge_count=eval_engine.graph_edge_count(),
+                cached_states=memory_stats["cached_states"],
+                hot_cache_size=memory_stats["hot_cache"],
+                shared_cache_sizes={
+                    "subcomplex": memory_stats["shared_subcomplex"],
+                    "neighbour_flip": memory_stats["shared_neighbour_flip"],
+                    "subcomplex_transition": memory_stats["shared_subcomplex_transition"],
+                    "subcomplex_neighbour": memory_stats["shared_subcomplex_neighbour"],
+                },
+            )
+            payload["managed_runtime"] = transition_pool.stats
+            payload["resident_memory"] = resident_memory
+            summary_path = Path(args.summary_path).expanduser()
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            print(f"Saved summary to {summary_path}")
+    finally:
+        eval_engine.close()

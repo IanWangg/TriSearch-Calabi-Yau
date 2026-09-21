@@ -251,8 +251,6 @@ class SNNSimplexActor(nn.Module):
         batch_size = int(num_available_subcomplexes.numel())
         if int(node_ptr.numel()) != batch_size + 1:
             raise ValueError("node_ptr must have one more element than the number of graphs.")
-        if subcomplex_vertices.size(0) == 0:
-            raise ValueError("Each graph must provide at least one candidate subcomplex.")
         if simplex_vertices.size(0) == 0:
             raise ValueError("Cannot score candidates without current top simplices.")
 
@@ -346,7 +344,7 @@ class SNNSimplexActor(nn.Module):
 
         for graph_idx in range(batch_size):
             num_candidates = int(num_available_subcomplexes[graph_idx].item())
-            if num_candidates == 0:
+            if num_candidates == 0 and not return_simplex_features:
                 continue
 
             graph_candidate_vertices = subcomplex_vertices[
@@ -356,9 +354,8 @@ class SNNSimplexActor(nn.Module):
             candidate_valid_mask = graph_candidate_vertices >= 0
             if bool((candidate_valid_mask.sum(dim=1) <= 0).any().item()):
                 raise ValueError("Encountered an empty subcomplex candidate.")
-            max_candidate_vertex = graph_candidate_vertices.masked_fill(~candidate_valid_mask, 0).amax()
             num_nodes = int((node_ptr[graph_idx + 1] - node_ptr[graph_idx]).item())
-            if int(max_candidate_vertex.item()) >= num_nodes:
+            if num_candidates and int(graph_candidate_vertices.masked_fill(~candidate_valid_mask, 0).amax().item()) >= num_nodes:
                 raise IndexError("Subcomplex vertex index out of range for graph.")
             graph_simplex_vertices = simplex_vertices[
                 simplex_start[graph_idx] : simplex_start[graph_idx] + num_top_simplices[graph_idx]
@@ -403,7 +400,7 @@ class SNNSimplexActor(nn.Module):
             )
 
         if not candidate_features:
-            raise ValueError("Each graph must provide at least one candidate subcomplex.")
+            return node_embeddings.new_empty((0, node_embeddings.size(-1))), node_ptr.new_empty((0,))
         candidate_features_tensor = torch.cat(candidate_features, dim=0)
         candidate_graph_indices_tensor = torch.cat(candidate_graph_indices, dim=0)
         if return_simplex_features:

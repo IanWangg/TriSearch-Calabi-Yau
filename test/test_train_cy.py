@@ -6,8 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from dataclasses import FrozenInstanceError
 
 import core.train_cy as train_cy
+import core.cy_training_config as training_config
+import core.cy_training_runner as training_runner
 from core.train_cy import (
     build_iteration_metrics_record,
     build_training_variant_suffix,
@@ -22,6 +25,7 @@ from core.train_cy import (
     write_iteration_metrics_record,
 )
 from core.training_types import PPOTrainStats, PolicyRolloutSummary
+from core.cy_training_config import CYTrainingConfig
 
 
 def test_parse_args_accepts_circuit_pool_actor_type():
@@ -38,14 +42,24 @@ def test_parse_args_accepts_snn_simplex_actor_type():
     assert value_feature_source_for_subcomplex_actor("snn_simplex") == "snn_simplex"
 
 
-def test_normalize_subcomplex_actor_type_treats_default_as_gnn():
-    assert normalize_subcomplex_actor_type("default") == "gnn"
+def test_normalize_subcomplex_actor_type_treats_default_as_snn_simplex():
+    assert normalize_subcomplex_actor_type("default") == "snn_simplex"
 
 
-def test_parse_args_defaults_to_gnn_actor_type():
+def test_parse_args_defaults_to_snn_simplex_actor_type():
     args = parse_args([])
 
-    assert args.subcomplex_actor_type == "gnn"
+    assert args.subcomplex_actor_type == "snn_simplex"
+
+
+def test_training_config_preserves_namespace_fields_and_is_frozen():
+    args = parse_args(["--num_states", "7", "--reward", "min_tri"])
+
+    config = CYTrainingConfig.from_namespace(args)
+
+    assert vars(config) == vars(args)
+    with pytest.raises(FrozenInstanceError):
+        config.num_states = 8
 
 
 def test_training_variant_suffix_includes_non_mlp_actor_type():
@@ -71,7 +85,9 @@ def test_parse_args_accepts_count_bonus_options():
 
     assert args.count_bonus_coef == 0.25
     assert args.count_bonus_exponent == 0.75
-    assert build_training_variant_suffix(args) == "_actor_gnn_count_bonus0p25_exp0p75"
+    assert build_training_variant_suffix(args) == (
+        "_actor_snn_simplex_value_snn_simplex_count_bonus0p25_exp0p75"
+    )
 
 
 def test_parse_args_accepts_vertex_aug_options():
@@ -97,7 +113,9 @@ def test_parse_args_accepts_vertex_aug_options():
     assert args.vertex_aug_scale_max == 1.2
     assert args.vertex_aug_shift_std == 0.03
     assert args.vertex_aug_reflect_prob == 0.2
-    assert build_training_variant_suffix(args) == "_actor_gnn_rollout_aug"
+    assert build_training_variant_suffix(args) == (
+        "_actor_snn_simplex_value_snn_simplex_rollout_aug"
+    )
 
 
 def test_parse_args_accepts_torch_thread_options():
@@ -318,11 +336,11 @@ def test_name_suffix_is_appended_to_checkpoint_dir(monkeypatch):
         captured_default_dirs.append(default_dir)
         raise RuntimeError("stop after checkpoint dir construction")
 
-    monkeypatch.setattr(train_cy, "load_cy_sample_rows", lambda *args, **kwargs: [])
-    monkeypatch.setattr(train_cy, "infer_dataset_coordinate_dim", lambda rows: 3)
-    monkeypatch.setattr(train_cy, "resolve_policy_in_channels", lambda rows, requested: 3)
+    monkeypatch.setattr(training_runner, "load_cy_sample_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(training_runner, "infer_dataset_coordinate_dim", lambda rows: 3)
+    monkeypatch.setattr(training_runner, "resolve_policy_in_channels", lambda rows, requested: 3)
     monkeypatch.setattr(
-        train_cy,
+        training_runner,
         "split_rows_by_vertex_count",
         lambda rows, num_eval_polytopes: SimpleNamespace(
             train_polytope_indices=[1],
@@ -331,9 +349,9 @@ def test_name_suffix_is_appended_to_checkpoint_dir(monkeypatch):
             eval_rows=[],
         ),
     )
-    monkeypatch.setattr(train_cy, "mean_vertex_count", lambda rows: 0.0)
+    monkeypatch.setattr(training_runner, "mean_vertex_count", lambda rows: 0.0)
     monkeypatch.setattr(
-        train_cy,
+        training_runner,
         "build_cy_rollout_collection",
         lambda *args, **kwargs: SimpleNamespace(
             base_states={},
@@ -362,7 +380,8 @@ def test_name_suffix_is_appended_to_checkpoint_dir(monkeypatch):
         train_cy.main(args)
 
     assert captured_default_dirs == [
-        "ckpt/cy_subcomplex_ppo_improved_128state_20rollout_actor_gnn_torch1_workers16"
+        "ckpt/cy_subcomplex_ppo_improved_128state_20rollout_"
+        "actor_snn_simplex_value_snn_simplex_torch1_workers16"
     ]
 
 
@@ -407,7 +426,7 @@ class _FakeTorch:
 
 def test_configure_torch_cpu_threads_sets_positive_values(monkeypatch):
     fake_torch = _FakeTorch()
-    monkeypatch.setattr(train_cy, "torch", fake_torch)
+    monkeypatch.setattr(training_config, "torch", fake_torch)
 
     result = configure_torch_cpu_threads(
         SimpleNamespace(torch_num_threads=2, torch_num_interop_threads=3)
@@ -425,7 +444,7 @@ def test_configure_torch_cpu_threads_sets_positive_values(monkeypatch):
 
 def test_configure_torch_cpu_threads_skips_non_positive_values(monkeypatch):
     fake_torch = _FakeTorch()
-    monkeypatch.setattr(train_cy, "torch", fake_torch)
+    monkeypatch.setattr(training_config, "torch", fake_torch)
 
     result = configure_torch_cpu_threads(
         SimpleNamespace(torch_num_threads=0, torch_num_interop_threads=-1)

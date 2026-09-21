@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import random
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 import torch
@@ -33,6 +33,18 @@ def set_seeds(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def increment_visitation(
+    states: Iterable[object],
+    visit_counts_by_key: dict[str, int] | None = None,
+) -> None:
+    for state in states:
+        if hasattr(state, "visitation"):
+            state.visitation += 1
+        if visit_counts_by_key is not None:
+            key = str(getattr(state, "key", state))
+            visit_counts_by_key[key] = int(visit_counts_by_key.get(key, 0)) + 1
 
 
 def resolve_training_device(*, gpu_index: int, force_cpu: bool) -> torch.device:

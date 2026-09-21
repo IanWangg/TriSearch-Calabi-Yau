@@ -10,12 +10,17 @@ MOSEK_LICENSE_PATH = os.environ.get("MOSEKLM_LICENSE_FILE", _DEFAULT_MOSEK_LICEN
 REGULARITY_BACKEND = os.environ.get("CYTOOLS_REGULARITY_BACKEND", "mosek")
 
 _configured = False
+_worker_configured = False
 
 
-def configure_cytools() -> None:
+def configure_cytools(*, worker: bool = False) -> None:
     """Configure CYTools once, using environment variables when available."""
-    global _configured
-    if _configured:
+    global _configured, _worker_configured
+    if worker:
+        for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                         "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS"):
+            os.environ[variable] = "1"
+    if _configured and (not worker or _worker_configured):
         return
     _configured = True
 
@@ -25,6 +30,9 @@ def configure_cytools() -> None:
     try:
         from cytools import config
 
+        if worker:
+            config.n_threads = 1
+            _worker_configured = True
         if MOSEK_LICENSE_PATH and Path(MOSEK_LICENSE_PATH).exists():
             config.set_mosek_path(MOSEK_LICENSE_PATH)
         enable = getattr(config, "enable_experimental_features", None)

@@ -5,11 +5,18 @@ import torch_geometric.nn as gnn
 
 from .act_resolver import activation_resolver
 from .snn_simplex_actor import SNNSimplexActor
+from .subcomplex_policy_config import (
+    DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
+    SUBCOMPLEX_ACTOR_TYPE_ALIASES,
+    SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
+    normalize_subcomplex_actor_type,
+    value_feature_source_for_subcomplex_actor,
+)
 
 
 class GCNSubcomplexAgent(nn.Module):
-    SUPPORTED_SUBCOMPLEX_ACTOR_TYPES = ("mlp", "gnn", "circuit_pool", "snn_simplex", "default")
-    LEGACY_SUBCOMPLEX_ACTOR_ALIASES = {"default": "gnn"}
+    SUPPORTED_SUBCOMPLEX_ACTOR_TYPES = SUPPORTED_SUBCOMPLEX_ACTOR_TYPES
+    LEGACY_SUBCOMPLEX_ACTOR_ALIASES = SUBCOMPLEX_ACTOR_TYPE_ALIASES
 
     """
     Subcomplex PPO policy with a GCN encoder.
@@ -30,7 +37,7 @@ class GCNSubcomplexAgent(nn.Module):
         mlp_hidden_channel_list=[64],
         use_projection=True,
         act="silu",
-        subcomplex_actor_type="gnn",
+        subcomplex_actor_type=DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
         device="cpu",
     ):
         super().__init__()
@@ -44,6 +51,9 @@ class GCNSubcomplexAgent(nn.Module):
         self.act = activation_resolver(act)
         self.subcomplex_actor_type = self._normalize_subcomplex_actor_type(
             subcomplex_actor_type
+        )
+        self.value_feature_source = value_feature_source_for_subcomplex_actor(
+            self.subcomplex_actor_type
         )
 
         layer_dims = [int(in_channels)]
@@ -103,17 +113,7 @@ class GCNSubcomplexAgent(nn.Module):
 
     @classmethod
     def _normalize_subcomplex_actor_type(cls, subcomplex_actor_type):
-        resolved_actor_type = str(subcomplex_actor_type).strip().lower()
-        resolved_actor_type = cls.LEGACY_SUBCOMPLEX_ACTOR_ALIASES.get(
-            resolved_actor_type,
-            resolved_actor_type,
-        )
-        if resolved_actor_type not in cls.SUPPORTED_SUBCOMPLEX_ACTOR_TYPES:
-            raise ValueError(
-                f"Unsupported subcomplex_actor_type '{subcomplex_actor_type}'. "
-                f"Expected one of: {', '.join(cls.SUPPORTED_SUBCOMPLEX_ACTOR_TYPES)}."
-            )
-        return resolved_actor_type
+        return normalize_subcomplex_actor_type(subcomplex_actor_type)
 
     def encode(self, h, edge_index):
         z = h
@@ -332,7 +332,7 @@ class GCNSubcomplexAgent(nn.Module):
 
         z_before_proj = self.encode(node_feature, edge_index)
         global_feature = gnn.pool.global_max_pool(z_before_proj, batch.batch)
-        value = self.value_head(global_feature)
+        value_feature = global_feature
 
         if self.subcomplex_actor_type in ("gnn", "circuit_pool", "snn_simplex"):
             policy_node_embeddings = z_before_proj
@@ -342,6 +342,8 @@ class GCNSubcomplexAgent(nn.Module):
             batch=batch,
             device=policy_node_embeddings.device,
         )
+        if subcomplex_vertices.size(0) == 0 and self.subcomplex_actor_type != "snn_simplex":
+            return self.value_head(value_feature).squeeze(-1), value_feature.new_empty((global_feature.size(0), 0))
         if self.subcomplex_actor_type == "gnn":
             subcomplex_features, _candidate_graph_index = self._decode_and_pool_batched_subcomplex_embeddings(
                 node_embeddings=policy_node_embeddings,
@@ -351,12 +353,23 @@ class GCNSubcomplexAgent(nn.Module):
             )
             logits_flat = self.subcomplex_decoder_head(subcomplex_features).squeeze(-1)
         elif self.subcomplex_actor_type == "snn_simplex":
-            subcomplex_features, _candidate_graph_index = self.snn_simplex_actor(
+            (
+                subcomplex_features,
+                _candidate_graph_index,
+                simplex_features,
+                simplex_graph_index,
+            ) = self.snn_simplex_actor(
                 node_embeddings=policy_node_embeddings,
                 subcomplex_vertices=subcomplex_vertices,
                 num_available_subcomplexes=num_available_subcomplexes,
                 node_ptr=batch.ptr,
                 batch=batch,
+                return_simplex_features=True,
+            )
+            value_feature = gnn.pool.global_max_pool(
+                simplex_features,
+                simplex_graph_index,
+                size=int(num_available_subcomplexes.numel()),
             )
             logits_flat = self.subcomplex_decoder_head(subcomplex_features).squeeze(-1)
         else:
@@ -374,6 +387,7 @@ class GCNSubcomplexAgent(nn.Module):
                     dim=-1,
                 )
             logits_flat = self.subcomplex_head(policy_features).squeeze(-1)
+        value = self.value_head(value_feature)
         logits_padded = self._build_padded_logits(logits_flat, num_available_subcomplexes)
         return value.squeeze(-1), logits_padded
 
@@ -401,6 +415,10 @@ class GCNSubcomplexAgent(nn.Module):
         return selected_actions_padded, action_indices, value.squeeze(-1), log_probs, entropy
 
     def get_value(self, batch):
+        if self.value_feature_source == "snn_simplex":
+            value, _logits = self.get_value_and_logits(batch)
+            return value
+
         z_before_proj = self.encode(batch.x, batch.edge_index)
         global_feature = gnn.pool.global_max_pool(z_before_proj, batch.batch)
         value = self.value_head(global_feature)

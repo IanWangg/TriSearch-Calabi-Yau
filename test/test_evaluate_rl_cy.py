@@ -451,3 +451,51 @@ def test_import_evaluate_rl_cy_does_not_emit_swig_deprecation_warnings():
     )
 
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize("parallel, workers", [(False, 1), (True, 3)])
+def test_managed_eval_runtime_closes_engine_and_pool_on_initialization_failure(parallel, workers):
+    from core.cy_evaluation_config import managed_rollout_runtime
+
+    events = []
+    pool_options = {}
+
+    def create_pool(**kwargs):
+        pool_options.update(kwargs)
+        events.append("pool_started")
+        return SimpleNamespace(shutdown=lambda: events.append("pool_closed"))
+
+    args = evaluate_rl_cy.parse_args(["--transition_num_workers", "3"])
+    args.use_multiprocessing = parallel
+    with pytest.raises(RuntimeError, match="model initialization failed"):
+        with managed_rollout_runtime(args, create_pool) as (pool, cache_bytes, register_engine):
+            assert pool is not None
+            transport_allowance = pool_options["configuration_cache_bytes"] * (workers + 1)
+            assert cache_bytes == (16 * 1024**3 - transport_allowance) // 4
+            register_engine(SimpleNamespace(close=lambda: events.append("engine_closed")))
+            raise RuntimeError("model initialization failed")
+    assert events == ["pool_started", "engine_closed", "pool_closed"]
+    assert pool_options["num_workers"] == workers
+    assert pool_options["memory_budget_gb"] == 64.0
+    assert pool_options["task_timeout_sec"] == 300.0
+
+
+def test_random_evaluation_uses_step_candidates_after_graph_eviction():
+    state = _state("source")
+    destination = _state("target")
+    result = SimpleNamespace(
+        input_states=[state], transitioned_states=[destination], next_states=[state],
+        rewards=[1.0], dones=[True], terminal_reasons=["frt_or_frst"], reset_count=1,
+        frt_hits=1, collapsed_hits=0, dead_end_hits=0, expanded_states=1,
+        discovered_states=1, used_multiprocessing=False, candidate_actions=[((0, 1, 2),)],
+    )
+    engine = SimpleNamespace(nodes_by_key={}, rollout_step=lambda *args, **kwargs: result)
+    summary = evaluate_rl_cy.collect_random_rollout_over_initial_states(
+        engine=engine, rng=np.random.default_rng(0), initial_states=[state],
+        rollout_length=1, gamma=0.95, use_multiprocessing=False,
+        transition_pool=None, transition_mp_chunksize=1, transition_mp_min_batch=1,
+        report_every=0, label="test",
+    )
+    assert summary.total_candidates == 1
+    assert summary.expanded_states == 1
+    assert summary.success_rate == 1.0
