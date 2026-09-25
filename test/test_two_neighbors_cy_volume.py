@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.evaluate_rl_cy import parse_args as parse_eval_args
 from core.cy_data_utils import create_data_from_cy_state_with_subcomplex
 from core.train_cy import (
     parse_args as parse_train_args,
@@ -74,7 +73,6 @@ def _frst_row():
 
 def test_neighbor_mode_cli_defaults_and_validation():
     assert parse_train_args([]).neighbor_mode == "regular"
-    assert parse_eval_args([]).neighbor_mode == "regular"
     args = parse_train_args(
         [
             "--neighbor_mode",
@@ -277,9 +275,8 @@ def test_max_kcup_log_reward_rejects_nonpositive_volumes(
     assert destination_cy.volume_calls == 1
 
 
-def test_max_kcup_is_available_in_train_and_eval_clis():
+def test_max_kcup_is_available_in_train_cli():
     assert parse_train_args(["--reward", "max_kcup"]).reward_function == "max_kcup"
-    assert parse_eval_args(["--reward", "max_kcup"]).reward_function == "max_kcup"
 
 
 @pytest.mark.parametrize("failed_tip", [None, [float("nan")]])
@@ -418,20 +415,15 @@ def test_max_toric_cy_volume_rejects_nonpositive_or_nonfinite_volume(volume):
         get_objective("max_toric_cy_volume")(state)
 
 
-def test_max_toric_cy_volume_is_available_in_train_and_eval_clis():
+def test_max_toric_cy_volume_is_available_in_train_cli():
     assert (
         parse_train_args(["--reward", "max_toric_cy_volume"]).reward_function
-        == "max_toric_cy_volume"
-    )
-    assert (
-        parse_eval_args(["--reward", "max_toric_cy_volume"]).reward_function
         == "max_toric_cy_volume"
     )
 
 
 def test_cy_volume_reward_transform_cli_and_validation():
     assert parse_train_args([]).cy_volume_reward_transform == "raw"
-    assert parse_eval_args([]).cy_volume_reward_transform == "raw"
 
     train_args = parse_train_args(
         [
@@ -441,16 +433,7 @@ def test_cy_volume_reward_transform_cli_and_validation():
             "log",
         ]
     )
-    eval_args = parse_eval_args(
-        [
-            "--reward",
-            "max_cy_volume",
-            "--cy_volume_reward_transform",
-            "log",
-        ]
-    )
     validate_cy_volume_reward_transform_args(train_args)
-    validate_cy_volume_reward_transform_args(eval_args)
 
     invalid_args = parse_train_args(
         ["--reward", "min_tri", "--cy_volume_reward_transform", "log"]

@@ -1,9 +1,6 @@
 from pathlib import Path
 
-import core.rollout_cy_random as random_rollout
 from core.cy_runtime_utils import load_policy_checkpoint
-from core.evaluate_rl_cy import parse_args as parse_eval_args
-from core.rollout_cy_policy import parse_args as parse_policy_rollout_args
 from core.train_cy import parse_args as parse_train_args
 from models.egnn_subcomplex_predictor import EGNNSubcomplexAgent
 from models.gcn_subcomplex_predictor import GCNSubcomplexAgent
@@ -34,8 +31,6 @@ def test_snn_simplex_is_the_default_across_public_policy_apis():
     assert DEFAULT_SUBCOMPLEX_ACTOR_TYPE == "snn_simplex"
     assert normalize_subcomplex_actor_type("default") == "snn_simplex"
     assert parse_train_args([]).subcomplex_actor_type == "snn_simplex"
-    assert parse_eval_args([]).subcomplex_actor_type == "snn_simplex"
-    assert parse_policy_rollout_args([]).subcomplex_actor_type == "snn_simplex"
 
     egnn = EGNNSubcomplexAgent(in_channels=4, out_channels=8, hidden_channels=8)
     gcn = GCNSubcomplexAgent(in_channels=4, out_channels=8, hidden_channels=8)
@@ -72,8 +67,3 @@ def test_explicit_gnn_and_snn_bundled_checkpoints_remain_loadable():
     assert gnn_policy.subcomplex_actor_type == "gnn"
 
 
-def test_random_rollout_module_exposes_only_the_cli_not_a_second_engine():
-    assert not hasattr(random_rollout, "CYRandomRolloutEngine")
-    args = random_rollout.parse_args(["--num_envs", "3", "--rollout_steps", "4"])
-    assert args.num_envs == 3
-    assert args.rollout_steps == 4

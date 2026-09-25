@@ -5,9 +5,7 @@ import pytest
 import torch
 
 import core.cy_policy_rollout_utils as policy_rollout
-from core.evaluate_rl_cy import build_summary_payload, parse_args as parse_eval_args
 from core.train_cy import parse_args as parse_train_args
-from core.training_types import PolicyRolloutSummary
 from mdp.cy_rollout import CYRandomRolloutEngine
 from reward_functions import get_objective, get_reward, infer_goal
 
@@ -106,8 +104,6 @@ def test_reward_cli_aliases_are_opt_in():
     assert parse_train_args([]).reward_function is None
     assert parse_train_args(["--reward", "min_tri"]).reward_function == "min_tri"
     assert parse_train_args(["--reward_function", "min_tri"]).reward_function == "min_tri"
-    assert parse_eval_args([]).reward_function is None
-    assert parse_eval_args(["--reward", "min_tri"]).reward_function == "min_tri"
 
 
 def test_objective_mode_expands_target_state_while_sampler_mode_stops():
@@ -201,62 +197,3 @@ def test_policy_objective_step_scores_destination_before_dead_end_reset(monkeypa
     assert result.collapsed_hits == 0
 
 
-def test_objective_summary_reports_goal_aware_improvement():
-    summary = PolicyRolloutSummary(
-        final_states=[],
-        rollout_buffer=None,
-        success_rate=0.0,
-        discounted_reward=1.0,
-        finished_fraction=0.0,
-        finished_count=0,
-        frt_hits=0,
-        collapsed_hits=0,
-        dead_end_hits=0,
-        all_step_reset_count=0,
-        all_step_frt_hits=0,
-        all_step_collapsed_hits=0,
-        all_step_dead_end_hits=0,
-        expanded_states=1,
-        discovered_states=1,
-        multiprocessing_steps=0,
-        total_candidates=1,
-        total_valid_actions=1,
-        candidate_expand_sec=0.0,
-        policy_data_build_sec=0.0,
-        policy_batch_transfer_sec=0.0,
-        policy_value_inference_sec=0.0,
-        policy_action_inference_sec=0.0,
-        transition_apply_sec=0.0,
-        objective_name="min_tri",
-        objective_goal="min",
-        objective_initial_values=[4.0, 5.0],
-        objective_final_values=[1.0, 6.0],
-        objective_best_values=[1.0, 5.0],
-    )
-    payload = build_summary_payload(
-        checkpoint_path="checkpoint.pth",
-        policy_mode="policy",
-        preprocessing="none",
-        device=torch.device("cpu"),
-        eval_initial_states=[object(), object()],
-        eval_polytope_indices=[1],
-        eval_summary=summary,
-        eval_steps=2,
-        eval_sec=0.1,
-        eval_mean_vertices=5.0,
-        graph_node_count=2,
-        graph_edge_count=1,
-        cached_states=2,
-        hot_cache_size=1,
-        shared_cache_sizes={
-            "subcomplex": 0,
-            "neighbour_flip": 0,
-            "subcomplex_transition": 0,
-            "subcomplex_neighbour": 0,
-        },
-    )
-
-    assert payload["objective"]["initial_mean"] == 4.5
-    assert payload["objective"]["best_mean"] == 3.0
-    assert payload["objective"]["mean_improvement"] == 1.5
-    assert payload["objective"]["improved_fraction"] == 0.5
