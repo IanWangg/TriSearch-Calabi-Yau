@@ -1,5 +1,8 @@
 import math
+import warnings
 from typing import TYPE_CHECKING, Any, Dict
+
+import numpy as np
 
 from reward_functions.common import Reward
 from core.cy_bounded_cache import BoundedLRU
@@ -40,7 +43,25 @@ class MaxKcupReward(Reward):
             )
 
         kcup = cy.mori_cone_cap(in_basis=True).dual()
-        volume = float(cy.compute_cy_volume(kcup.tip_of_stretched_cone(c=1)))
+        tip = kcup.tip_of_stretched_cone(c=1, backend="mosek")
+        if tip is None or not np.isfinite(tip).all():
+            warnings.warn(
+                f"max_kcup mosek tip solver failed for state '{state_key}'; retrying with osqp.",
+                RuntimeWarning,
+            )
+            tip = kcup.tip_of_stretched_cone(c=1, backend="osqp")
+        if tip is None or not np.isfinite(tip).all():
+            warnings.warn(
+                f"max_kcup tip solver failed for state '{state_key}'; retrying with cvxopt.",
+                RuntimeWarning,
+            )
+            # CVXOPT solves the same minimum-norm QP, unlike the LP backends.
+            tip = kcup.tip_of_stretched_cone(c=1, backend="cvxopt")
+        if tip is None or not np.isfinite(tip).all():
+            raise ValueError(f"max_kcup could not solve the stretched cone tip for state '{state_key}'.")
+        volume = float(cy.compute_cy_volume(tip))
+        if not math.isfinite(volume):
+            raise ValueError(f"max_kcup returned a nonfinite volume for state '{state_key}'.")
         self._volume_by_state_key[state_key] = volume
         return volume
 

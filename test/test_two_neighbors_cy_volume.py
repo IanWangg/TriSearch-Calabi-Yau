@@ -183,7 +183,7 @@ class _FakeCY:
     def dual(self):
         return self
 
-    def tip_of_stretched_cone(self, *, c):
+    def tip_of_stretched_cone(self, *, c, backend=None):
         assert c == 1
         return [1.0]
 
@@ -280,6 +280,53 @@ def test_max_kcup_log_reward_rejects_nonpositive_volumes(
 def test_max_kcup_is_available_in_train_and_eval_clis():
     assert parse_train_args(["--reward", "max_kcup"]).reward_function == "max_kcup"
     assert parse_eval_args(["--reward", "max_kcup"]).reward_function == "max_kcup"
+
+
+@pytest.mark.parametrize("failed_tip", [None, [float("nan")]])
+@pytest.mark.parametrize("successful_backend", ["mosek", "osqp", "cvxopt"])
+def test_max_kcup_retries_failed_tip_with_equivalent_qp(failed_tip, successful_backend):
+    cy = _FakeCY(8.0)
+    calls = []
+
+    def solve_tip(*, c, backend=None):
+        calls.append((c, backend))
+        return [1.0] if backend == successful_backend else failed_tip
+
+    cy.tip_of_stretched_cone = solve_tip
+    state = SimpleNamespace(key="retry", cy_triangulation=_FakeCYTriangulation(cy))
+    reward = get_reward("max_kcup")
+    if successful_backend == "mosek":
+        assert reward.metric(state) == 8.0
+    else:
+        with pytest.warns(RuntimeWarning, match="retrying with"):
+            assert reward.metric(state) == 8.0
+    assert reward.metric(state) == 8.0
+    backends = ["mosek", "osqp", "cvxopt"]
+    assert calls == [(1, backend) for backend in backends[:backends.index(successful_backend) + 1]]
+    assert cy.volume_calls == 1
+
+
+def test_max_kcup_failed_solvers_do_not_compute_or_cache_volume():
+    cy = _FakeCY(8.0)
+    cy.tip_of_stretched_cone = lambda **kwargs: None
+    state = SimpleNamespace(key="failed_tip", cy_triangulation=_FakeCYTriangulation(cy))
+    reward = get_reward("max_kcup")
+    for _ in range(2):
+        with pytest.warns(RuntimeWarning), pytest.raises(ValueError, match="failed_tip"):
+            reward.metric(state)
+    assert cy.volume_calls == 0
+    assert cy.mori_cone_calls == 2
+
+
+def test_max_kcup_nonfinite_volume_is_not_cached():
+    cy = _FakeCY(float("nan"))
+    state = SimpleNamespace(key="invalid_volume", cy_triangulation=_FakeCYTriangulation(cy))
+    reward = get_reward("max_kcup")
+    with pytest.raises(ValueError, match="nonfinite volume"):
+        reward.metric(state)
+    cy.volume = 8.0
+    assert reward.metric(state) == 8.0
+    assert cy.volume_calls == 2
 
 
 def test_max_cy_volume_log_reward_is_exact_and_keeps_raw_metric():

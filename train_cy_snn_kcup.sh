@@ -40,8 +40,8 @@ export PYTHONUNBUFFERED=1
   --batch_size 128 \
   --lr 0.0001 \
   --use_multiprocessing \
-  --memory_budget_gb 64 \
-  --runtime_cache_gb 16 \
+  --memory_budget_gb 128 \
+  --runtime_cache_gb 32 \
   --num_eval_polytopes 100 \
   --num_eval_states 128 \
   --eval_steps 30 \
@@ -52,6 +52,7 @@ export PYTHONUNBUFFERED=1
   --latest_checkpoint_interval 10 \
   --save_interval 100 \
   --wandb_project calabi_yau_snn_kcup \
+  --use_wandb \
   --name_suffix "${RUN_ID}" \
   "$@" \
   2>&1 | tee "${RUN_DIR}/train_performance.log"
