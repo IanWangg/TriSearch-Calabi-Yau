@@ -239,6 +239,7 @@ class SNNSimplexActor(nn.Module):
         node_ptr: torch.Tensor,
         batch,
         return_simplex_features: bool = False,
+        simplex_only: bool = False,
     ):
         device = node_embeddings.device
         dtype = node_embeddings.dtype
@@ -286,6 +287,9 @@ class SNNSimplexActor(nn.Module):
         ).coalesce()
         simplex_embeddings = self._apply_snn_layers(laplacian, simplex_embeddings)
 
+        if simplex_only:
+            return simplex_embeddings, simplex_graph
+
         num_memberships = self._as_long_vector(
             batch.num_snn_candidate_simplex_memberships,
             device,
@@ -326,6 +330,7 @@ class SNNSimplexActor(nn.Module):
         node_ptr: torch.Tensor,
         batch,
         return_simplex_features: bool = False,
+        simplex_only: bool = False,
     ):
         simplex_vertices, num_top_simplices = self._extract_topology(
             batch=batch,
@@ -344,7 +349,7 @@ class SNNSimplexActor(nn.Module):
 
         for graph_idx in range(batch_size):
             num_candidates = int(num_available_subcomplexes[graph_idx].item())
-            if num_candidates == 0 and not return_simplex_features:
+            if num_candidates == 0 and not (return_simplex_features or simplex_only):
                 continue
 
             graph_candidate_vertices = subcomplex_vertices[
@@ -373,7 +378,7 @@ class SNNSimplexActor(nn.Module):
                 dtype=node_embeddings.dtype,
             )
             simplex_embeddings = self._apply_snn_layers(laplacian, simplex_embeddings)
-            if return_simplex_features:
+            if return_simplex_features or simplex_only:
                 simplex_features.append(simplex_embeddings)
                 simplex_graph_indices.append(
                     torch.full(
@@ -383,6 +388,8 @@ class SNNSimplexActor(nn.Module):
                         dtype=torch.long,
                     )
                 )
+            if simplex_only:
+                continue
             candidate_features.append(
                 self._pool_candidate_simplex_embeddings(
                     simplex_embeddings,
@@ -399,6 +406,8 @@ class SNNSimplexActor(nn.Module):
                 )
             )
 
+        if simplex_only:
+            return torch.cat(simplex_features, dim=0), torch.cat(simplex_graph_indices, dim=0)
         if not candidate_features:
             return node_embeddings.new_empty((0, node_embeddings.size(-1))), node_ptr.new_empty((0,))
         candidate_features_tensor = torch.cat(candidate_features, dim=0)
@@ -411,6 +420,16 @@ class SNNSimplexActor(nn.Module):
                 torch.cat(simplex_graph_indices, dim=0),
             )
         return candidate_features_tensor, candidate_graph_indices_tensor
+
+    def encode_simplices(self, *, node_embeddings, node_ptr, batch):
+        """Critic features without candidate pooling or action logits."""
+        method = self._forward_cached if self._has_cached_topology(batch) else self._forward_slow
+        return method(
+            node_embeddings=node_embeddings, node_ptr=node_ptr, batch=batch,
+            subcomplex_vertices=node_ptr.new_empty((0, 0)),
+            num_available_subcomplexes=node_ptr.new_zeros(node_ptr.numel() - 1),
+            simplex_only=True,
+        )
 
     def forward(
         self,

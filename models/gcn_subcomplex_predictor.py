@@ -415,11 +415,13 @@ class GCNSubcomplexAgent(nn.Module):
         return selected_actions_padded, action_indices, value.squeeze(-1), log_probs, entropy
 
     def get_value(self, batch):
-        if self.value_feature_source == "snn_simplex":
-            value, _logits = self.get_value_and_logits(batch)
-            return value
-
         z_before_proj = self.encode(batch.x, batch.edge_index)
+        if self.value_feature_source == "snn_simplex":
+            features, graph_indices = self.snn_simplex_actor.encode_simplices(
+                node_embeddings=z_before_proj, node_ptr=batch.ptr, batch=batch,
+            )
+            global_feature = gnn.pool.global_max_pool(features, graph_indices, size=batch.num_graphs)
+            return self.value_head(global_feature).squeeze(-1)
         global_feature = gnn.pool.global_max_pool(z_before_proj, batch.batch)
         value = self.value_head(global_feature)
         return value.squeeze(-1)

@@ -14,9 +14,12 @@ class MinTriangulationReward(Reward):
     def metric(self, state: TriangulationState) -> float:
         return -float(len(state.simplices))
 
+    def from_objectives(self, current: float, following: float) -> float:
+        return float(current - following)
+
     def __call__(
         self,
         state: TriangulationState,
         next_state: TriangulationState,
     ) -> float:
-        return float(len(state.simplices) - len(next_state.simplices))
+        return self.from_objectives(len(state.simplices), len(next_state.simplices))

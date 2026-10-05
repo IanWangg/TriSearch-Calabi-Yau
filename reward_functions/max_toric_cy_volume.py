@@ -58,4 +58,4 @@ class MaxToricCYVolumeReward(Reward):
         state: CYTriangulationState,
         next_state: CYTriangulationState,
     ) -> float:
-        return self.metric(next_state) - self.metric(state)
+        return self.from_objectives(self.metric(state), self.metric(next_state))

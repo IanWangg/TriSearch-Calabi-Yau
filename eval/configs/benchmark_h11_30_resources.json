@@ -1,0 +1,23 @@
+{
+  "rl_value_beam_search": {
+    "cpu_count": 8,
+    "transition_num_workers": 4,
+    "memory_budget_gb": 16,
+    "gpu_index": 3
+  },
+  "beam_search": {
+    "cpu_count": 4,
+    "transition_num_workers": 2,
+    "memory_budget_gb": 8
+  },
+  "best_first": {
+    "cpu_count": 4,
+    "transition_num_workers": 2,
+    "memory_budget_gb": 8
+  },
+  "cyopt_ga": {
+    "cpu_count": 4,
+    "transition_num_workers": 2,
+    "memory_budget_gb": 8
+  }
+}

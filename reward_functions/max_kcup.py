@@ -70,12 +70,12 @@ class MaxKcupReward(Reward):
         state: CYTriangulationState,
         next_state: CYTriangulationState,
     ) -> float:
-        current_volume = self.metric(state)
-        next_volume = self.metric(next_state)
+        return self.from_objectives(self.metric(state), self.metric(next_state))
+
+    def from_objectives(self, current_volume: float, next_volume: float) -> float:
         if current_volume <= 0.0 or next_volume <= 0.0:
             raise ValueError(
                 "max_kcup log volume reward requires strictly positive volumes, "
-                f"but got V_current={current_volume} for state '{state.key}' and "
-                f"V_next={next_volume} for state '{next_state.key}'."
+                f"but got V_current={current_volume} and V_next={next_volume}."
             )
         return math.log(next_volume) - math.log(current_volume)

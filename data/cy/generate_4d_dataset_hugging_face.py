@@ -8,7 +8,7 @@ import sys
 import time
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -260,7 +260,13 @@ def load_hugging_face_4d_n_lattice_polytope_specs(
     repo_id: str = HUGGING_FACE_DATASET_REPO,
     revision: str = HUGGING_FACE_DATASET_REVISION,
     cache_dir: Optional[str] = None,
+    accept_polytope: Optional[Callable[[Dict[str, Any], Any], bool]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Select in source order; an optional predicate may reject validated candidates.
+
+    Candidate indices and source records remain stable across predicate rejections.
+    Without a predicate, training's existing selection behavior is unchanged.
+    """
     if int(num_polytopes) <= 0:
         raise ValueError("num_polytopes must be positive.")
     if int(h11) < 0:
@@ -290,6 +296,7 @@ def load_hugging_face_4d_n_lattice_polytope_specs(
     specs: List[Dict[str, Any]] = []
     scanned_matching_rows = 0
     rejected_favorability_rows = 0
+    candidate_count = rejected_candidate_rows = 0
     for filename in parquet_files:
         try:
             source_rows = _load_hugging_face_parquet_rows_with_retry(
@@ -342,7 +349,7 @@ def load_hugging_face_4d_n_lattice_polytope_specs(
                     "source_euler_characteristic": int(source_row["euler_characteristic"]),
                 }
                 spec: Dict[str, Any] = {
-                    "polytope_index": int(len(specs)),
+                    "polytope_index": candidate_count,
                     "h11": int(h11),
                     "requested_num_vertices": None
                     if num_vertices is None
@@ -355,6 +362,10 @@ def load_hugging_face_4d_n_lattice_polytope_specs(
                 }
                 if actual_favorable is not None:
                     spec["favorable"] = bool(actual_favorable)
+                candidate_count += 1
+                if accept_polytope is not None and not accept_polytope(spec, n_polytope):
+                    rejected_candidate_rows += 1
+                    continue
                 specs.append(spec)
                 if len(specs) >= int(num_polytopes):
                     break
@@ -398,6 +409,8 @@ def load_hugging_face_4d_n_lattice_polytope_specs(
     }
     if repo_id == HUGGING_FACE_DATASET_REPO:
         source_metadata["dataset_license"] = "cc-by-sa-4.0"
+    if accept_polytope is not None:
+        source_metadata.update(candidate_count=candidate_count, rejected_candidate_rows=rejected_candidate_rows)
     return specs, source_metadata
 
 

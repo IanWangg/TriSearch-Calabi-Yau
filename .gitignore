@@ -8,8 +8,14 @@ build/
 dist/
 wandb/
 runs/
+eval/data/cache/
+eval/data/setups/
+eval/smoke_tests/
+eval/logs/
+/eval/sweep/
 
 AGENTS.md
+!eval/AGENTS.md
 CLAUDE.md
 
 # Generated CY outputs are large; keep only curated samples checked into this extraction.

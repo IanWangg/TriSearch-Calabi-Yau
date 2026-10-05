@@ -641,10 +641,6 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         return selected_actions_padded, action_indices, value.squeeze(-1), log_probs, entropy
 
     def get_value(self, batch):
-        if self.value_feature_source == "snn_simplex":
-            value, _logits = self.get_value_and_logits(batch)
-            return value
-
         node_coord = batch.x
         node_feature = batch.x
         edge_index = batch.edge_index
@@ -660,6 +656,15 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
             z_remove_before_proj, z_add_before_proj = self.encode(
                 h=node_feature, x=node_coord, edges=edge_index, edge_attr=edge_attr,
             )
+
+        if self.value_feature_source == "snn_simplex":
+            embeddings = (z_remove_before_proj if self.share_encoder else
+                          (z_remove_before_proj + z_add_before_proj) / 2.0)
+            features, graph_indices = self.snn_simplex_actor.encode_simplices(
+                node_embeddings=embeddings, node_ptr=batch.ptr, batch=batch,
+            )
+            global_feature = gnn.pool.global_max_pool(features, graph_indices, size=batch.num_graphs)
+            return self.value_head(global_feature).squeeze(-1)
 
         global_feature = gnn.pool.global_max_pool(z_remove_before_proj, batch.batch)
         if not self.share_encoder:

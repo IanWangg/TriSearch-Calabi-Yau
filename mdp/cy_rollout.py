@@ -614,6 +614,50 @@ class CYRandomRolloutEngine:
         self._objective_cache[cache_key] = float(result)
         return float(result)
 
+    def objective_values(self, states, name):
+        """Yield an ordered logical batch using the existing bounded worker pool.
+
+        The caller owns logical query accounting. In-flight duplicate requests
+        share physical work only when objective caching is enabled. Consume or
+        close this iterator before submitting any other geometry work.
+        """
+        states = list(states)
+        if name in ("min_tri", "max_tri"):
+            yield from (float(len(state.simplices)) for state in states)
+            return
+        requests, positions, cached_values, pending = [], [], {}, {}
+        cache_enabled = self._objective_cache.max_bytes > 0 and self._objective_cache.max_entries != 0
+        for index, state in enumerate(states):
+            key = (name, state.key)
+            cached = self._objective_cache.get(key)
+            if cached is not None:
+                cached_values[index] = cached
+                positions.append(None)
+                continue
+            if not cache_enabled or key not in pending:
+                pending[key] = len(requests)
+                requests.append({"operation": "objective", "configuration": state.configuration,
+                                 "state": state.to_payload(), "reward_name": name})
+            positions.append(pending[key])
+        if requests and self.transition_pool is None:
+            raise RuntimeError("Geometry objective requires a managed transition pool.")
+        outputs = (iter(self.transition_pool.imap(execute_geometry_request, requests, chunksize=1))
+                   if requests else iter(()))
+        resolved = {}
+        try:
+            for index, (state, position) in enumerate(zip(states, positions)):
+                if position is None:
+                    yield cached_values[index]
+                else:
+                    if position not in resolved:
+                        resolved[position] = float(next(outputs))
+                        self._objective_cache[(name, state.key)] = resolved[position]
+                    yield resolved[position]
+        finally:
+            close = getattr(outputs, "close", None)
+            if close is not None:
+                close()
+
     def close(self):
         for state in self.base_states.values():
             if isinstance(state, CyStateRecord):

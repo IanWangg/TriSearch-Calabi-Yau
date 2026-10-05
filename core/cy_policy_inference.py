@@ -233,11 +233,12 @@ class PolicyActionEvaluationResult:
     policy_inference_sec: float
 
 
-def _forward_policy_data(data_list: Sequence[Data], policy: Any, *, device: torch.device, value_only: bool = False):
+def _forward_policy_data(data_list: Sequence[Data], policy: Any, *, device: torch.device,
+                         value_only: bool = False, max_graph_size: int | None = None):
     values, logits = [], []
     transfer_sec = inference_sec = 0.0
     max_candidates = max(_data_num_available_subcomplexes(data) for data in data_list)
-    for indices in policy_data_chunks(data_list, policy=policy):
+    for indices in policy_data_chunks(data_list, policy=policy, max_graph_size=max_graph_size):
         batch = Batch.from_data_list([data_list[index] for index in indices])
         start = time.perf_counter()
         batch = batch.to(device)
@@ -267,6 +268,42 @@ def _forward_policy_data(data_list: Sequence[Data], policy: Any, *, device: torc
         inference_sec += time.perf_counter() - start
         del batch
     return torch.cat(values), None if value_only else torch.cat(logits), transfer_sec, inference_sec
+
+
+@dataclass(frozen=True)
+class PolicyScoreResult:
+    value_tensor: torch.Tensor
+    logits_tensor: torch.Tensor | None
+    data_build_sec: float
+    batch_transfer_sec: float
+    inference_sec: float
+    physical_batches: int
+
+
+def evaluate_policy_scores(
+    states: Sequence[Any], action_lists: Sequence[Sequence[CanonicalAction]], policy: Any,
+    *, device: torch.device, value_only: bool = False, max_graph_size: int | None = None,
+) -> PolicyScoreResult:
+    """Shared inference without sampling; callers own search rules and RNGs.
+
+    Value-only callers can pass empty action lists: the critic depends on the
+    state topology, not its outgoing actions. No neighbor enumeration is needed.
+    """
+    if len(states) != len(action_lists):
+        raise ValueError("states and action_lists must have the same length.")
+    if not states:
+        return PolicyScoreResult(torch.empty(0, device=device), None, 0.0, 0.0, 0.0, 0)
+    policy = _ensure_policy_device(policy, device)
+    start = time.perf_counter()
+    data = build_cy_data_list(states, action_lists, include_simplex_topology=_policy_uses_simplex_topology(policy))
+    build_sec = time.perf_counter() - start
+    with torch.inference_mode():
+        values, logits, transfer_sec, inference_sec = _forward_policy_data(
+            data, policy, device=device, value_only=value_only, max_graph_size=max_graph_size,
+        )
+    batches = sum(1 for _ in policy_data_chunks(data, policy=policy, max_graph_size=max_graph_size))
+    return PolicyScoreResult(values, logits, build_sec, transfer_sec, inference_sec, batches)
+
 
 def batched_policy_action_selection(
     states: Sequence[Any],

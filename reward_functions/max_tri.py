@@ -19,4 +19,4 @@ class MaxTriangulationReward(Reward):
         state: TriangulationState,
         next_state: TriangulationState,
     ) -> float:
-        return self.metric(next_state) - self.metric(state)
+        return self.from_objectives(self.metric(state), self.metric(next_state))

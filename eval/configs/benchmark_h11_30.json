@@ -1,0 +1,24 @@
+{
+  "num_polytopes": 5,
+  "h11": 30,
+  "num_starts": 5,
+  "objective_budget": 2000,
+  "seed": 0,
+  "skip_insufficient_starts": true,
+  "hf_revision": "60c0e119a03608418df538191f65da3f43b5b819",
+  "algorithms": [
+    "rl_value_beam_search",
+    "beam_search",
+    "best_first",
+    "cyopt_ga"
+  ],
+  "reward_function": "max_kcup",
+  "beam_width": 4,
+  "policy_proposal_count": 4,
+  "value_discount": 0.9,
+  "policy_checkpoint": "runs/cy_snn_kcup_h11_15_20260921_123000_1584461/checkpoints/latest.pth",
+  "cache_states": true,
+  "runtime_cache_gb": 1.0,
+  "transition_num_workers": 1,
+  "gpu_index": 0
+}
