@@ -47,7 +47,7 @@ class GraphPool:
                                    tuple(action for action, _ in entries), frozenset(), tuple(entries))
 
 
-def run_graph(tmp_path, algorithm, *, cache=True, budget=5, adjacency=None, values=None, seed=4, goal="max"):
+def run_graph(tmp_path, algorithm, *, cache=True, budget=5, adjacency=None, values=None, seed=4, goal="max", batch=False):
     pool = GraphPool(adjacency or [[1, 2, 3], [0], [0], [0]], values or [10.0, 5.0, 5.0, 2.0])
     source = pool.states[0]
     engine = CYRandomRolloutEngine(
@@ -55,13 +55,14 @@ def run_graph(tmp_path, algorithm, *, cache=True, budget=5, adjacency=None, valu
         polytope_by_index={0: source.configuration}, neighbor_mode="two_neighbors",
         include_points_interior_to_facets=False, reward_function=lambda a, b: 0.0,
         state_cache_mode="lru" if cache else "none", cache_budget_bytes=1000000 if cache else 0,
-        transition_pool=pool, history_path=str(tmp_path / f"{algorithm.name}_{cache}_{budget}_{seed}.sqlite3"),
+        transition_pool=pool, history_path=str(tmp_path / f"{algorithm.name}_{cache}_{budget}_{seed}_{batch}.sqlite3"),
     )
     queries, transitions = [], []
     try:
         result = run_rollout(
             source, algorithm, engine, objective_function=lambda state: engine.objective_value(state, "max_kcup"),
             objective_goal=goal, objective_budget=budget, seed=seed,
+            batch_objective_function=(lambda states: engine.objective_values(states, "max_kcup")) if batch else None,
             on_query=queries.append, on_transition=transitions.append,
             on_expansion=pool.expansion_events.append,
         )
@@ -258,6 +259,27 @@ def test_frontier_cache_eviction_preserves_pending_nodes_and_all_events(tmp_path
     assert q1 == q2 and t1 == t2 == []
     assert warm.expansion_events == cold.expansion_events
     assert len(cold.objective_calls) == uncached.objective_queries + 1
+
+
+@pytest.mark.parametrize("algorithm", [BestFirstAlgorithm, BeamSearchAlgorithm])
+@pytest.mark.parametrize("cache", [False, True])
+@pytest.mark.parametrize("budget", [0, 3, 20])
+def test_frontier_batch_preserves_query_order_dedup_budget_and_events(tmp_path, algorithm, cache, budget):
+    args = dict(adjacency=[[0, 1, 1, 2], [0, 2, 3, 4], [0, 3], [1], []],
+                values=[1.0, 10.0, 9.0, 20.0, 3.0], cache=cache, budget=budget)
+    scalar = run_graph(tmp_path, algorithm(), **args)
+    batched = run_graph(tmp_path, algorithm(), batch=True, **args)
+    assert scalar[0] == batched[0]
+    assert scalar[2:] == batched[2:]
+    assert scalar[1].expansion_events == batched[1].expansion_events
+    assert scalar[1].expansion_calls == batched[1].expansion_calls
+    assert scalar[1].objective_calls == batched[1].objective_calls
+
+
+@pytest.mark.parametrize("algorithm", [BestFirstAlgorithm, BeamSearchAlgorithm])
+def test_frontier_batch_failure_keeps_logical_query_context(tmp_path, algorithm):
+    with pytest.raises(RuntimeError, match=f"algorithm={algorithm.name}, polytope=0, start=0, queries=2"):
+        run_graph(tmp_path, algorithm(), batch=True, cache=False, values=[1.0, 2.0, math.nan, 4.0])
 
 
 @pytest.mark.parametrize("algorithm", [BestFirstAlgorithm, BeamSearchAlgorithm])

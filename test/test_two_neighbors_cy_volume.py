@@ -285,7 +285,7 @@ def test_max_kcup_retries_failed_tip_with_equivalent_qp(failed_tip, successful_b
     cy = _FakeCY(8.0)
     calls = []
 
-    def solve_tip(*, c, backend=None):
+    def solve_tip(*, c, backend=None, constraint_error_tol=None):
         calls.append((c, backend))
         return [1.0] if backend == successful_backend else failed_tip
 
@@ -299,7 +299,33 @@ def test_max_kcup_retries_failed_tip_with_equivalent_qp(failed_tip, successful_b
             assert reward.metric(state) == 8.0
     assert reward.metric(state) == 8.0
     backends = ["mosek", "osqp", "cvxopt"]
-    assert calls == [(1, backend) for backend in backends[:backends.index(successful_backend) + 1]]
+    expected = [(1, "mosek")]
+    if successful_backend != "mosek":
+        expected += [(2.0 ** -power, "mosek") for power in range(1, 17)]
+        expected += [(1, backend) for backend in backends[1:backends.index(successful_backend) + 1]]
+    assert calls == expected
+    assert cy.volume_calls == 1
+
+
+@pytest.mark.parametrize("scale", [0.5, 0.25, 0.00390625])
+def test_max_kcup_rescales_qp_tip_to_original_stretch_before_volume(scale):
+    cy = _FakeCY(8.0)
+    calls = []
+
+    def solve_tip(*, c, backend=None, constraint_error_tol=None):
+        calls.append((c, backend, constraint_error_tol))
+        if c == scale:
+            assert backend == "mosek" and constraint_error_tol == 0.05 * c
+            return [c]
+        return None
+
+    cy.tip_of_stretched_cone = solve_tip
+    state = SimpleNamespace(key="rescaled", cy_triangulation=_FakeCYTriangulation(cy))
+    reward = get_reward("max_kcup")
+    with pytest.warns(RuntimeWarning, match="rescaled mosek"):
+        assert reward.metric(state) == 8.0
+    assert reward.metric(state) == 8.0
+    assert calls[-1] == (scale, "mosek", 0.05 * scale)
     assert cy.volume_calls == 1
 
 

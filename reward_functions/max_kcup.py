@@ -46,6 +46,22 @@ class MaxKcupReward(Reward):
         tip = kcup.tip_of_stretched_cone(c=1, backend="mosek")
         if tip is None or not np.isfinite(tip).all():
             warnings.warn(
+                f"max_kcup mosek tip solver failed for state '{state_key}'; retrying with rescaled mosek.",
+                RuntimeWarning,
+            )
+            # min ||t||^2 subject to Ht >= c is homogeneous: t(c)/c = t(1).
+            # Scale the constraint-check tolerance too, preserving the c=1 check.
+            for power in range(1, 17):
+                scale = 2.0 ** -power
+                scaled = kcup.tip_of_stretched_cone(
+                    c=scale, backend="mosek", constraint_error_tol=0.05 * scale,
+                )
+                if scaled is not None and np.isfinite(scaled).all():
+                    tip = np.asarray(scaled) / scale
+                    if np.isfinite(tip).all():
+                        break
+        if tip is None or not np.isfinite(tip).all():
+            warnings.warn(
                 f"max_kcup mosek tip solver failed for state '{state_key}'; retrying with osqp.",
                 RuntimeWarning,
             )

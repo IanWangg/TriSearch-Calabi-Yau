@@ -181,8 +181,9 @@ class _RolloutSession:
 class _SearchContext:
     """Per-start graph deduplication, independent of the shared engine's history."""
 
-    def __init__(self, session: _RolloutSession, initial: SearchNode):
+    def __init__(self, session: _RolloutSession, initial: SearchNode, batch_objective_function=None):
         self._session = session
+        self._batch_objective_function = batch_objective_function
         self.initial = initial
         self.goal = session.goal
         self._seen_keys = {initial.state.key}
@@ -195,14 +196,31 @@ class _SearchContext:
         return (-node.objective if self.goal == "max" else node.objective, node.query_index)
 
     def expand(self, node: SearchNode) -> Iterator[SearchNode]:
-        with self._session.expansion(node) as (context, transitions):
+        materialized = {} if self._batch_objective_function is not None else None
+        values = iter(())
+        objective = (lambda state: next(values)) if materialized is not None else None
+        with self._session.expansion(node, objective_function=objective,
+                                     materialized_states=materialized) as (context, transitions):
+            actions, pending_keys = [], set()
             for action in context.actions:
                 key = transitions[action].next_key
-                if key in self._seen_keys:
+                if key in self._seen_keys or key in pending_keys:
                     continue
-                evaluated = context.evaluate_action(action)
-                self._seen_keys.add(key)
-                yield SearchNode(evaluated.state, evaluated.objective, evaluated.query_index, node.depth + 1)
+                pending_keys.add(key)
+                actions.append(action)
+            if materialized is not None and actions:
+                materialized.update((action, self._session.engine.materialize_transition(node.state, transitions[action]))
+                                    for action in actions)
+                values = iter(self._batch_objective_function([materialized[action] for action in actions]))
+            try:
+                for action in actions:
+                    evaluated = context.evaluate_action(action)
+                    self._seen_keys.add(evaluated.state.key)
+                    yield SearchNode(evaluated.state, evaluated.objective, evaluated.query_index, node.depth + 1)
+            finally:
+                close = getattr(values, "close", None)
+                if close is not None:
+                    close()
 
 
 class _PopulationContext:
@@ -338,7 +356,7 @@ def run_rollout(
         if isinstance(algorithm, PopulationAlgorithm):
             reason = algorithm.run_population(_PopulationContext(session, initial))
         elif isinstance(algorithm, FrontierSearchAlgorithm):
-            algorithm.search(_SearchContext(session, initial))
+            algorithm.search(_SearchContext(session, initial, batch_objective_function))
             reason = "budget_exhausted" if session.remaining_budget == 0 else "frontier_exhausted"
         else:
             reason = session.walk(initial, algorithm)

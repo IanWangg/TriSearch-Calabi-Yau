@@ -190,6 +190,7 @@ def run_evaluation(
                         result = run_rollout(
                             state, algorithm, engine,
                             objective_function=objective, objective_goal=goal,
+                            batch_objective_function=lambda states: engine.objective_values(states, spec.reward_function),
                             objective_budget=spec.objective_budget,
                             seed=seed,
                             start_index=start_index, objective_name=spec.reward_function,

@@ -162,6 +162,19 @@ best value forward. Failed/missing trajectories, nonconsecutive queries,
 unpaired starts, inconsistent counts and nonpositive volumes raise an error.
 Readers stream query JSONL and retain numeric curves, not full state traces.
 
+Ordinary Beam and BeFS batch the unseen children of one admitted parent through
+the existing managed objective pool. Results are consumed in canonical action
+order and each still passes through rollout query accounting. Whole-parent
+budget boundaries and graph deduplication are unchanged; the scalar callback
+remains available to callers without a batch provider.
+
+If the `max_kcup` unit-stretch MoSEK QP fails numerically, the shared reward
+retries the same minimum-norm QP at smaller positive stretches and divides
+the resulting tip by that stretch before computing volume. Constraint-check
+tolerances scale with the stretch. Homogeneity makes this the original c=1
+objective; successful original solves retain their existing values. OSQP and
+CVXOPT remain subsequent fallbacks if the rescaled MoSEK solves also fail.
+
 ## Genetic algorithm (cyopt)
 
 `cyopt_ga` calls the installed upstream `cyopt.GA`. The optional dependency was
@@ -180,6 +193,11 @@ faces use up to `ga_face_samples=1000` seeded upstream samples. Restrictions of
 all supplied starts are included before evaluating objectives. For the h11=21
 five-polytope setup all faces have at most 10 points, so enumeration is complete.
 Preparation uses no objective queries; its wall time is recorded separately.
+
+The adapter maps sampled 2D point coordinates back to each face's ambient
+polytope labels before sorting the codebook. This preserves face restrictions
+when upstream `grow_frt` returns a newly labelled 2D polytope. Missing or
+inconsistent points still fail validation.
 
 Each independent GA population begins with that rollout's exact shared FRST;
 its known initial objective is reused for free. The remaining initial members

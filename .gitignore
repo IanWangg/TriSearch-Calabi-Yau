@@ -12,7 +12,12 @@ eval/data/cache/
 eval/data/setups/
 eval/smoke_tests/
 eval/logs/
-/eval/sweep/
+/eval/sweep/*
+!/eval/sweep/checkpoint_600_h11_50/
+/eval/sweep/checkpoint_600_h11_50/*
+!/eval/sweep/checkpoint_600_h11_50/README.md
+!/eval/sweep/checkpoint_600_h11_50/configs/
+!/eval/sweep/checkpoint_600_h11_50/scripts/
 
 AGENTS.md
 !eval/AGENTS.md

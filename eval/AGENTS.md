@@ -97,6 +97,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 - `two_neighbors` 是 CYTools 的邻居定义，**不表示一个状态恰好有两个邻居**；不能硬编码邻居数量为 2。
 - 使用 registry 中的 objective 和优化方向；通用算法遵循 `goal="min"` 或 `goal="max"`。
 - `max_kcup` 的 objective 是原始 CY volume；其 transition reward 是 `log(V_next) - log(V_current)`。固定当前状态时，两种方式对邻居的排序一致。
+- `max_kcup` 的 c=1 MoSEK QP 数值失败时，可重试较小的正 stretch c，并将所得 tip 除以 c 后计算 volume；最小范数 QP 的齐次性保持原 c=1 objective，约束检查 tolerance 必须同步乘 c。原 c=1 成功结果保持不变；缩放重试仍失败后沿用 OSQP/CVXOPT fallback。
 - 结果中的 `max_kcup` objective 记录原始 volume。所有 objective 必须有限；`max_kcup` 还必须严格为正。求解失败沿用共享实现的处理，失败后不能伪造数值继续搜索。
 
 ### 查询预算
@@ -133,6 +134,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 - BeFS 按节点 objective 排序，不累计路径 reward，不设置任意前沿大小上限；死路不影响继续处理其他前沿节点。
 - Beam 初始层只有起点。每层仅保留新子节点，父节点不作为 elite 带入下一层；当前层按 objective 和首次发现顺序展开。
 - BeFS/Beam 遵循 objective 的 min/max 方向，objective 并列时按首次发现顺序决定优先级，不依赖集合或堆的偶然顺序。
+- 普通 BeFS/Beam 可通过现有 `engine.objective_values` 并行计算同一父节点的未发现邻居；按 canonical action 顺序消费结果，每项仍走 rollout 查询计数，保持完整父节点预算边界并及时关闭批量 iterator。
 
 ### 搜索去重
 
@@ -167,6 +169,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 - `cyopt_ga` 是 population family，经 `PopulationAlgorithm.run_population` 和共享 `_PopulationContext` 计费；直接调用已安装的上游 `cyopt.GA`，不另写选择、交叉、变异或代际去重实现。目前仅支持 `max_kcup`。
 - 二维面 DNA 由上游 `cyopt.frst` 编解码。每个 polytope 的 codebook 按 canonical simplices 固定排序，最多 12 点的面完整枚举，更大的面以派生 seed 采样最多 1000 个；参数 `ga_face_max_points` / `ga_face_samples` 可配置。目标求值前加入所有共享起点的面限制，保证输入起点可表示。codebook、哈希、各起点 DNA、参数和准备耗时写入 `cyopt_encoding/`，准备不消耗 objective 查询。
 - 每个 rollout 的种群第一项必须是该起点 DNA，复用其免费初始值；其余随机种群成员的有效 objective 查询计费。重复起点 DNA 返回原始完整 FRST，不能替换 q=0 的状态。多个互异完整 FRST 可有同一 DNA；空 DNA 正常以 `dna_space_singleton` 结束，保留全部配对起点。
+- 大面的上游 `grow_frt` 可能返回重新编号的局部二维 polytope。适配器必须按点坐标映射回该 face 的 ambient 标签，再规范化、排序和合并起点限制；点集合不匹配时明确失败，不能把局部编号当作全局标签。
 - 默认种群 50、tournament k=3、单点 crossover、mutation rate=0.1、mutation k=1、elitism=1。优化 fitness 是负的原始 volume；记录的 objective 仍是正原始 volume。极小 DNA 空间的有效 elitism 截到空间大小减一并写入 generation 日志。
 - 上游 fitness cache 必须为零；每次有效 fitness 请求走共享 rollout 查询计数，即使重复 DNA 或命中 engine cache 也计一次。保留 elite 的已知 fitness 不重新查询。上游重建明确返回 None 的 DNA 是免费几何拒绝，内部 fitness 为 inf，但不得把 inf 写成 volume；拒绝 DNA 及原因写入当前 expansion。其他异常正常失败，不吞掉。
 - DNA 解码别名可存入 engine 既有 bounded hot-state cache，以独立前缀、polytope index、codebook 哈希、DNA 为 key，共用原有容量和 pressure/close 生命周期，不另建缓存或增加额度。cache 关闭也必须关闭此别名缓存，起点 DNA 始终先返回该 rollout 的原始 FRST。缓存前后轨迹及计费须一致。

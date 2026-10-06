@@ -107,6 +107,28 @@ def test_ga_config_rejects_invalid_settings(change):
         EvaluationSpec(1, 12, 1, 3, algorithms=("cyopt_ga",), **change)
 
 
+def test_real_cyopt_face_samples_preserve_ambient_labels():
+    from cytools import Polytope
+    from eval.algorithm.cyopt_ga import _label_face_triangulations
+    from mdp.cy_state_record import canonical_simplices
+
+    fixture = Path(__file__).resolve().parents[1] / "data/cy/two_neighbors_h11_12.samples.jsonl"
+    polytope = Polytope(json.loads(fixture.read_text().splitlines()[0])["vertices"])
+    for face in polytope.faces(2):
+        # grow_frt constructs precisely this local 2D polytope internally.
+        local = Polytope(face.as_poly().points(optimal=True)).triangulate(
+            make_star=False, include_points_interior_to_facets=True,
+        )
+        restored = _label_face_triangulations(face, [local])[0]
+        by_coordinate = dict(zip((tuple(point) for point in face.points(optimal=True)), face.labels))
+        labels = {label: by_coordinate[tuple(point)] for label, point in zip(local.labels, local.points())}
+        expected = canonical_simplices([[labels[label] for label in simplex] for simplex in local.simplices()])
+        assert canonical_simplices(restored.simplices()) == expected
+        assert {label for simplex in restored.simplices() for label in simplex} == set(face.labels)
+        assert restored.is_fine() and restored.is_regular()
+        assert _label_face_triangulations(face, [restored])[0] is restored
+
+
 def test_real_cyopt_encoding_queries_cache_equivalence_and_paired_start(tmp_path):
     from eval.pipeline import run_evaluation
     from eval.setup import EvaluationSetup, save_eval_setup

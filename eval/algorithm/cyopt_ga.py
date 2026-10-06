@@ -39,6 +39,26 @@ def cyopt_metadata():
     return metadata
 
 
+def _label_face_triangulations(face, triangulations):
+    """Restore ambient labels after grow_frt creates a local 2D polytope."""
+    points = dict(zip((tuple(point) for point in face.points()), face.labels))
+    optimal_points = dict(zip((tuple(point) for point in face.points(optimal=True)), face.labels))
+    result = []
+    for triang in triangulations:
+        coordinates = [tuple(point) for point in triang.points()]
+        lookup = points if set(coordinates) == set(points) else optimal_points
+        if set(coordinates) != set(lookup):
+            raise ValueError("A sampled triangulation does not contain the requested face points.")
+        labels = {int(label): int(lookup[point]) for label, point in zip(triang.labels, coordinates)}
+        if any(label != ambient for label, ambient in labels.items()):
+            triang = face.as_poly().triangulate(
+                simplices=[[labels[int(label)] for label in simplex] for simplex in triang.simplices()],
+                include_points_interior_to_facets=True, make_star=False, check_input_simplices=False,
+            )
+        result.append(triang)
+    return result
+
+
 class CyoptEncoding:
     """One sorted, audited 2-face codebook shared by this polytope's starts."""
 
@@ -55,6 +75,8 @@ class CyoptEncoding:
         # Rebuild the codebook for this run's declared sampling parameters.
         self.polytope._cyopt_prepped = False
         faces = self.polytope.face_triangs(max_npts=max_points, N_face_triangs=samples, seed=seed)
+        faces = [_label_face_triangulations(face, triangulations)
+                 for face, triangulations in zip(self.polytope.faces(2), faces)]
         face_maps = [{canonical_simplices(tri.simplices()): tri for tri in face} for face in faces]
         initial_triangs = [_triangulate(self.polytope, state.configuration, canonical_simplices(state.simplices))
                           for state in starts]
@@ -72,6 +94,7 @@ class CyoptEncoding:
         self.metadata = dict(
             format_version=1, polytope_index=self.configuration.index, seed=seed,
             max_points=max_points, samples=samples, bounds=self.bounds,
+            face_label_mapping="ambient_labels_by_coordinates",
             face_point_counts=[len(face.points()) for face in self.polytope.faces(2)],
             face_triangulations=codebook,
             codebook_sha256=hashlib.sha256(json.dumps(codebook, separators=(",", ":")).encode()).hexdigest(),
