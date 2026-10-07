@@ -17,6 +17,7 @@ from mdp.cy_state_record import (
     canonical_simplices,
     normalize_neighbor_mode,
     state_key,
+    two_face_state_key,
 )
 
 
@@ -149,6 +150,9 @@ def _build_collection(request):
         points=tuple(tuple(int(coord) for coord in point) for point in polytope.points()),
         labels=tuple(int(label) for label in polytope.labels),
         include_points_interior_to_facets=interior,
+        two_face_labels=(tuple(sorted(tuple(sorted(int(label) for label in face.labels))
+                                      for face in polytope.faces(2)))
+                         if request.get("two_face_state", False) else ()),
     )
     _register_configuration(configuration)
     states = {}
@@ -285,9 +289,13 @@ def _expand(request, configuration, payload, polytope):
 def _objective(request, configuration, payload, polytope):
     index, simplices, mode, *_ = payload
     name = str(request["reward_name"])
+    two_face_state = request.get("two_face_state", False)
+    if two_face_state and name != "max_kcup":
+        raise ValueError("two_face_state currently supports only max_kcup.")
     if name in ("min_tri", "max_tri"):
         return float(len(simplices))
-    key = state_key(index, simplices, mode)
+    key = (two_face_state_key(configuration, simplices) if two_face_state
+           else state_key(index, simplices, mode))
     # Registration entries can be evicted independently of scalar objectives.
     # Include the immutable geometry, because an index may be reused by another
     # collection sharing this worker pool after the old registration disappears.

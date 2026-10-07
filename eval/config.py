@@ -57,8 +57,13 @@ class EvaluationSpec:
     ga_max_stalled_generations: int = 20
     ga_face_max_points: int = 12
     ga_face_samples: int = 1000
+    two_face_state: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.two_face_state) is not bool:
+            raise ValueError("two_face_state must be a boolean.")
+        if self.two_face_state and self.reward_function != "max_kcup":
+            raise ValueError("two_face_state currently supports only max_kcup.")
         for name in ("num_polytopes", "num_starts", "transition_num_workers", "max_hot_states", "beam_width",
                      "in_channels", "out_channels", "hidden_channels", "num_layers", "policy_max_graph_size"):
             value = getattr(self, name)

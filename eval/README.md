@@ -2,6 +2,39 @@
 
 Development rules and evaluation semantics are maintained in [AGENTS.md](AGENTS.md).
 
+## Two_face_state
+
+`two_face_state` defaults to `false`. Enable it with `--two_face_state` or
+`"two_face_state": true` in an evaluation config; `--no_two_face_state` overrides
+the config. It currently supports `max_kcup` only and is a search setting, so
+existing setups, sampled starts and setup checksums remain reusable.
+
+When enabled, evaluation identifies states by the canonical triangulations of
+**all ambient polytope 2-faces**, using ambient point labels. Distinct full FRSTs
+with identical restrictions are one evaluation state. BeFS/Beam and RL visited,
+discovered and batch-reservation sets use this identity before objective queries.
+The first successfully queried representative keeps its original search score;
+later equivalent representatives are skipped. Random/Greedy and GA retain their
+existing repeated-query charging rules. Search history remains per start even
+when two distinct supplied starts represent the same 2-face class.
+
+Full FRSTs and their original keys remain available to the geometry engine and
+actor/critic; network features and checkpoint loading are unchanged. KCUP still
+uses the existing solver on a full representative. Engine and worker objective
+caches use the 2-face key, including duplicate requests within a physical batch.
+Cache hits still count as logical queries; disabling caches also disables this
+physical reuse.
+
+Results retain format version 2 and existing full-FRST `state_key` fields for
+geometry provenance. Enabled runs additionally write `evaluation_state_key`,
+`source_evaluation_state_key` and `best_evaluation_state_key` in state events, and
+`initial_evaluation_state_key` / `best_evaluation_state_key` in rollout summaries.
+Population query sources remain null. The config records `state_representation`.
+Offline readers validate 2-face identities and matching class metrics (relative
+tolerance `1e-6` for numerical solves), including across combined runs. They allow
+distinct full-FRST starts in the same class and reject mixed representation
+settings. Historical runs without the option are interpreted as `false`.
+
 ## Directory organization
 
 Use these locations for new evaluation work; paths below are relative to the
@@ -616,3 +649,11 @@ cache settings. The opt-in online smoke downloads one h11=12 polytope, generates
 one FRST start, and evaluates all four algorithms with objective budget 5 under
 both cache settings. Synthetic graphs separately check frontier order, pruning,
 cycle deduplication and the per-parent budget boundary.
+
+The [h11_50 two_face diagnostics](sweep/h11_50_two_face_diagnostics_20261007_052000/README.md)
+project the original full histories, verify short native replays, and compare
+equivalent FRST representatives with the iteration 600 checkpoint. The study
+records duplicate-class expansion yields, best-path ancestry, critic spread,
+and native neighbor/policy overlap without new full benchmarks or GA runs.
+Programmatic RL evaluation accepts an optional `search_observer` callback for
+detached proposal, candidate-score and frontier snapshots; the default is `None`.

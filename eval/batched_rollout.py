@@ -46,7 +46,7 @@ class _Expansion:
     values: dict = field(default_factory=dict)
 
 
-def _prepare_layer(trajectories, engine, policy):
+def _prepare_layer(trajectories, engine, policy, search_observer=None):
     """Batch free neighbor enumeration/scoring, then admit a budgeted prefix.
 
     Enumeration may prefetch later beam parents. Only admitted parents become
@@ -82,15 +82,30 @@ def _prepare_layer(trajectories, engine, policy):
             previous = trajectory
         if remaining <= 0:
             continue
-        next_keys = [item.transitions[action].next_key for action in item.actions]
+        next_keys = [trajectory.session.transition_key(item.parent.node.state, item.transitions[action])
+                     for action in item.actions]
         item.selected_indices = trajectory.algorithm.propose(
             next_keys, item.log_probabilities, trajectory.seen, trajectory.session.rng, reserved,
         )
+        if search_observer is not None:
+            search_observer({
+                **trajectory.session.identity, "event": "proposal",
+                "parent_key": item.parent.node.state.key,
+                "parent_query_index": item.parent.node.query_index,
+                "depth": item.parent.node.depth,
+                "candidates": [dict(
+                    action=list(action), state_key=item.transitions[action].next_key,
+                    search_key=key, seen=key in trajectory.seen, reserved=key in reserved,
+                    selected=index in item.selected_indices,
+                    log_probability=(float(item.log_probabilities[index])
+                                     if item.log_probabilities is not None else None),
+                ) for index, (action, key) in enumerate(zip(item.actions, next_keys))],
+            })
         for index in item.selected_indices:
             action = item.actions[index]
             state = engine.materialize_transition(item.parent.node.state, item.transitions[action])
             item.states[action] = state
-            reserved.add(state.key)
+            reserved.add(trajectory.session.state_key(state))
         remaining -= len(item.selected_indices)
         scheduled.append(item)
     return scheduled
@@ -101,12 +116,15 @@ def run_batched_rollouts(
     objective_function, objective_goal, objective_budget, seeds, start_indices,
     objective_name="max_kcup", reward_function=None, batch_objective_function=None,
     on_query=None, on_transition=None, on_expansion=None, on_rollout=None,
+    two_face_state=False, search_observer=None,
 ) -> list[RolloutResult]:
     """Advance every start together; physical chunks never own search state.
 
     Batch objective providers must yield values in input order. They implement
     physical work only; each result still passes through _RolloutSession.
     Without a batch provider the scalar callback remains supported.
+    Optional search observers receive detached scalar snapshots of decisions;
+    observation performs no additional inference, geometry or objective calls.
     """
     if type(objective_budget) is not int or objective_budget < 0:
         raise ValueError("objective_budget must be a non-negative integer.")
@@ -156,11 +174,12 @@ def run_batched_rollouts(
                     objective_function=objective_function, objective_goal=objective_goal,
                     objective_name=objective_name, objective_budget=objective_budget,
                     on_query=on_query, on_transition=on_transition, on_expansion=on_expansion,
+                    two_face_state=two_face_state,
                 )
                 current_session = session
                 value = session.evaluate(state, depth=0, objective_function=lambda _: next(initial_values))
                 initial = SearchNode(state, value, 0, 0)
-                trajectory = _Trajectory(session, algorithm, initial, [_ScoredNode(initial)], {state.key})
+                trajectory = _Trajectory(session, algorithm, initial, [_ScoredNode(initial)], {session.state_key(state)})
                 trajectories.append(trajectory)
                 if session.remaining_budget == 0:
                     trajectory.reason = "budget_exhausted"
@@ -171,7 +190,7 @@ def run_batched_rollouts(
             active = [trajectory for trajectory in trajectories if trajectory.result is None]
             current_session = active[0].session
             try:
-                scheduled = _prepare_layer(active, engine, policy)
+                scheduled = _prepare_layer(active, engine, policy, search_observer)
                 value_inputs = [(item, action, state) for item in scheduled
                                 if item.trajectory.algorithm.requires_values
                                 for action, state in item.states.items()]
@@ -202,7 +221,7 @@ def run_batched_rollouts(
                             for index in item.selected_indices:
                                 action = item.actions[index]
                                 evaluated = context.evaluate_action(action)
-                                trajectory.seen.add(evaluated.state.key)
+                                trajectory.seen.add(session.state_key(evaluated.state))
                                 score = algorithm.score_candidate(
                                     item.parent.score,
                                     item.log_probabilities[index] if algorithm.requires_policy else 0.0,
@@ -214,6 +233,16 @@ def run_batched_rollouts(
                                 child = SearchNode(evaluated.state, evaluated.objective, evaluated.query_index,
                                                    item.parent.node.depth + 1)
                                 next_frontiers[id(trajectory)].append(_ScoredNode(child, float(score)))
+                                if search_observer is not None:
+                                    search_observer({
+                                        **session.identity, "event": "candidate_score",
+                                        "parent_key": item.parent.node.state.key,
+                                        "state_key": evaluated.state.key,
+                                        "search_key": session.state_key(evaluated.state),
+                                        "query_index": evaluated.query_index,
+                                        "objective": float(evaluated.objective),
+                                        "critic": item.values.get(action), "score": float(score),
+                                    })
                                 if algorithm.is_walk:
                                     session.move(item.parent.node, evaluated, queries_before)
 
@@ -238,6 +267,18 @@ def run_batched_rollouts(
                         trajectory.frontier = sorted(children,
                                                      key=lambda item: (-item.score, item.node.query_index))[
                                                          :trajectory.algorithm.beam_width]
+                    if search_observer is not None:
+                        def snapshot(item):
+                            return dict(state_key=item.node.state.key, score=item.score,
+                                        query_index=item.node.query_index)
+                        search_observer({
+                            **trajectory.session.identity, "event": "frontier",
+                            "queries": trajectory.session.queries,
+                            "selected": [snapshot(item) for item in trajectory.frontier],
+                            "pending_count": len(trajectory.pending_frontier),
+                            "pending_top": [snapshot(row[2]) for row in
+                                            heapq.nsmallest(8, trajectory.pending_frontier)],
+                        })
                     if not trajectory.frontier:
                         trajectory.reason = "frontier_exhausted"
                         finish(trajectory)

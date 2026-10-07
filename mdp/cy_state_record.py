@@ -31,6 +31,32 @@ def state_key(index: int, simplices: Iterable[Iterable[int]], neighbor_mode: str
     return key if neighbor_mode == "regular" else f"{neighbor_mode}|{key}"
 
 
+def two_face_state_key(configuration: "CYPointConfiguration", simplices: Iterable[Iterable[int]]) -> str:
+    """Identify a triangulation by its restrictions to the ambient 2-faces.
+
+    Face labels come from CYTools in the worker. Intersecting each full simplex
+    with these labels is the geometry-free equivalent of Triangulation.restrict.
+    Keep faces separate: the full triangulation's arbitrary interior triangles
+    are not part of this representation.
+    """
+    if not configuration.two_face_labels:
+        raise ValueError("two_face_state requires ambient 2-face labels from the geometry worker.")
+    simplices = tuple(frozenset(simplex) for simplex in simplices)
+    restrictions = []
+    for labels in canonical_simplices(configuration.two_face_labels):
+        face = frozenset(labels)
+        triangles = {tuple(sorted(intersection)) for simplex in simplices
+                     if len(intersection := face.intersection(simplex)) == 3}
+        if not triangles:
+            raise ValueError(f"Missing triangulation restriction for 2-face {labels}.")
+        restrictions.append((tuple(sorted(labels)), canonical_simplices(triangles)))
+    return f"two_face|{configuration.index}:{tuple(restrictions)}"
+
+
+def evaluation_state_key(state: "CyStateRecord", two_face_state: bool = False) -> str:
+    return state.two_face_key if two_face_state else state.key
+
+
 @dataclass(frozen=True)
 class CYPointConfiguration:
     index: int
@@ -38,6 +64,7 @@ class CYPointConfiguration:
     points: tuple[tuple[int, ...], ...]
     labels: tuple[int, ...]
     include_points_interior_to_facets: bool
+    two_face_labels: tuple[tuple[int, ...], ...] = ()
 
 
 @dataclass
@@ -50,6 +77,7 @@ class CyStateRecord:
     visitation: int = 0
     key: str = field(init=False)
     _edges: frozenset[tuple[int, ...]] | None = field(default=None, init=False, repr=False)
+    _two_face_key: str | None = field(default=None, init=False, repr=False, compare=False)
     _objective_provider: Callable[["CyStateRecord", str], float] | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -66,6 +94,12 @@ class CyStateRecord:
     @property
     def vertices(self) -> tuple[tuple[int, ...], ...]:
         return self.configuration.input_vertices
+
+    @property
+    def two_face_key(self) -> str:
+        if self._two_face_key is None:
+            self._two_face_key = two_face_state_key(self.configuration, self.simplices)
+        return self._two_face_key
 
     @property
     def edges(self) -> frozenset[tuple[int, ...]]:

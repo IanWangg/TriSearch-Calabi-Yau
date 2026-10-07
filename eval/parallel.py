@@ -62,7 +62,7 @@ def run_parallel_evaluation(spec, setup=None, *, resources_path, output_dir=None
     """Reuse the ordinary eval CLI for each algorithm; never duplicate search logic."""
     from data.cy.pipeline import _write_json_atomic
     from eval.pipeline import EvaluationResult
-    from eval.rollout import RolloutResult
+    from eval.rollout import RolloutResult, TwoFaceRolloutResult
     from eval.setup import prepare_eval_setup, save_eval_setup
 
     resources = plan_parallel_resources(spec, resources_path)
@@ -135,7 +135,8 @@ def run_parallel_evaluation(spec, setup=None, *, resources_path, output_dir=None
                     if len(checkpoint_hashes) != 1:
                         raise ValueError("Parallel RL jobs loaded different checkpoint contents.")
                 with (child_dir / "rollouts.jsonl").open() as stream:
-                    rollouts.extend(RolloutResult(**json.loads(line)) for line in stream if line.strip())
+                    result_type = TwoFaceRolloutResult if spec.two_face_state else RolloutResult
+                    rollouts.extend(result_type(**json.loads(line)) for line in stream if line.strip())
                 job["status"] = "complete"
                 pending.remove(name)
                 _write_json_atomic(output_dir / "benchmark.json", manifest)

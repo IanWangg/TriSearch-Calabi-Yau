@@ -54,6 +54,7 @@ def run_evaluation(
     output_dir: str | Path | None = None,
     algorithm_factories: Mapping[str, Callable[[], Algorithm]] | None = None,
     policy: PolicyScorer | None = None,
+    search_observer=None,
 ) -> EvaluationResult:
     """Each algorithm owns its workers/caches; starts share caches within it.
 
@@ -89,6 +90,7 @@ def run_evaluation(
             "setup_path": str(setup.path), "neighbor_mode": "two_neighbors",
             "budget_unit": "logical_objective_query", "initial_objective_is_free": True,
             "budget_tail": "complete_parent_expansion", "environment": _environment_metadata(),
+            "state_representation": "two_face_restrictions" if spec.two_face_state else "full_simplices",
         }
         writer.write_json("config", config)
         if "cyopt_ga" in spec.algorithms:
@@ -114,6 +116,7 @@ def run_evaluation(
                 collection = build_cy_rollout_collection(
                     setup.rows, include_points_interior_to_facets=False,
                     neighbor_mode="two_neighbors", transition_pool=pool,
+                    two_face_state=spec.two_face_state,
                 )
                 reward = get_reward(spec.reward_function)
                 objective = get_objective(spec.reward_function, reward=reward)
@@ -125,6 +128,7 @@ def run_evaluation(
                     max_hot_states=spec.max_hot_states, cache_budget_bytes=cache_bytes,
                     history_path=str(output_dir / "runtime" / name / "states.sqlite3"),
                     action_order="canonical",
+                    two_face_state=spec.two_face_state,
                 )
                 register_engine(engine)
                 starts, algorithms, seeds, start_indices = [], [], [], []
@@ -164,6 +168,8 @@ def run_evaluation(
                         batch_objective_function=lambda states: engine.objective_values(states, spec.reward_function),
                         on_query=writer.query, on_transition=writer.transition, on_expansion=writer.expansion,
                         on_rollout=writer.rollout,
+                        two_face_state=spec.two_face_state,
+                        search_observer=search_observer,
                     )
                     rollouts.extend(results)
                     policy_stats[name] = {**(policy.stats() if isinstance(policy, EvaluationPolicy) else {}),
@@ -195,6 +201,7 @@ def run_evaluation(
                             seed=seed,
                             start_index=start_index, objective_name=spec.reward_function,
                             on_query=writer.query, on_transition=writer.transition, on_expansion=writer.expansion,
+                            two_face_state=spec.two_face_state,
                         )
                         rollouts.append(result)
                         writer.rollout(result)

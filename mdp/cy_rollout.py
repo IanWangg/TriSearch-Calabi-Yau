@@ -12,7 +12,10 @@ import numpy as np
 from core.cy_bounded_cache import BoundedLRU, retained_size
 from core.cy_process_runtime import ManagedProcessPool
 from core.cy_state_history import StateHistory
-from mdp.cy_state_record import CyStateRecord, CYPointConfiguration, normalize_neighbor_mode as _normalize_neighbor_mode
+from mdp.cy_state_record import (
+    CyStateRecord, CYPointConfiguration, evaluation_state_key,
+    normalize_neighbor_mode as _normalize_neighbor_mode,
+)
 from mdp.cy_geometry_worker import execute_geometry_request
 
 # An explicitly injected geometry factory remains supported for lightweight
@@ -339,11 +342,14 @@ def build_cy_rollout_collection(
     include_points_interior_to_facets: bool,
     neighbor_mode: str = "regular",
     transition_pool: Any = None,
+    two_face_state: bool = False,
 ) -> CYRolloutCollection:
     mode = _normalize_neighbor_mode(neighbor_mode)
     if mode == "two_neighbors" and include_points_interior_to_facets:
         raise ValueError("neighbor_mode='two_neighbors' requires include_points_interior_to_facets=False.")
     if Polytope is not None:
+        if two_face_state:
+            raise ValueError("two_face_state requires managed geometry workers.")
         return _build_cy_rollout_collection_inline(rows, include_points_interior_to_facets=include_points_interior_to_facets, neighbor_mode=mode)
     owned = transition_pool is None
     pool = transition_pool or create_transition_pool(num_workers=1)
@@ -351,7 +357,7 @@ def build_cy_rollout_collection(
     try:
         requests = ({"operation": "build_collection", "row": row,
                      "include_points_interior_to_facets": include_points_interior_to_facets,
-                     "neighbor_mode": mode} for row in rows)
+                     "neighbor_mode": mode, "two_face_state": two_face_state} for row in rows)
         for result in pool.imap(execute_geometry_request, requests):
             configuration = result["configuration"]
             if configuration.index in configurations and configurations[configuration.index] != configuration:
@@ -447,7 +453,11 @@ class CYRandomRolloutEngine:
         history_path: str | None = None,
         transition_pool: Any = None,
         action_order: str = "canonical",
+        two_face_state: bool = False,
     ):
+        if type(two_face_state) is not bool:
+            raise ValueError("two_face_state must be a boolean.")
+        self.two_face_state = two_face_state
         if collection is not None:
             base_states = collection.base_states
             initial_states = collection.initial_states
@@ -600,9 +610,11 @@ class CYRandomRolloutEngine:
         self.prune_runtime_caches()
 
     def objective_value(self, state, name):
+        if self.two_face_state and name != "max_kcup":
+            raise ValueError("two_face_state currently supports only max_kcup.")
         if name in ("min_tri", "max_tri"):
             return float(len(state.simplices))
-        cache_key = (name, state.key)
+        cache_key = (name, evaluation_state_key(state, self.two_face_state))
         cached = self._objective_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -610,7 +622,8 @@ class CYRandomRolloutEngine:
         if pool is None:
             raise RuntimeError("Geometry objective requires a managed transition pool.")
         result = next(pool.imap(execute_geometry_request, [{"operation": "objective",
-            "configuration": state.configuration, "state": state.to_payload(), "reward_name": name}]))
+            "configuration": state.configuration, "state": state.to_payload(), "reward_name": name,
+            "two_face_state": self.two_face_state}]))
         self._objective_cache[cache_key] = float(result)
         return float(result)
 
@@ -622,13 +635,15 @@ class CYRandomRolloutEngine:
         close this iterator before submitting any other geometry work.
         """
         states = list(states)
+        if self.two_face_state and name != "max_kcup":
+            raise ValueError("two_face_state currently supports only max_kcup.")
         if name in ("min_tri", "max_tri"):
             yield from (float(len(state.simplices)) for state in states)
             return
         requests, positions, cached_values, pending = [], [], {}, {}
         cache_enabled = self._objective_cache.max_bytes > 0 and self._objective_cache.max_entries != 0
         for index, state in enumerate(states):
-            key = (name, state.key)
+            key = (name, evaluation_state_key(state, self.two_face_state))
             cached = self._objective_cache.get(key)
             if cached is not None:
                 cached_values[index] = cached
@@ -637,7 +652,8 @@ class CYRandomRolloutEngine:
             if not cache_enabled or key not in pending:
                 pending[key] = len(requests)
                 requests.append({"operation": "objective", "configuration": state.configuration,
-                                 "state": state.to_payload(), "reward_name": name})
+                                 "state": state.to_payload(), "reward_name": name,
+                                 "two_face_state": self.two_face_state})
             positions.append(pending[key])
         if requests and self.transition_pool is None:
             raise RuntimeError("Geometry objective requires a managed transition pool.")
@@ -651,7 +667,7 @@ class CYRandomRolloutEngine:
                 else:
                     if position not in resolved:
                         resolved[position] = float(next(outputs))
-                        self._objective_cache[(name, state.key)] = resolved[position]
+                        self._objective_cache[(name, evaluation_state_key(state, self.two_face_state))] = resolved[position]
                     yield resolved[position]
         finally:
             close = getattr(outputs, "close", None)

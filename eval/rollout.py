@@ -14,7 +14,7 @@ from eval.algorithm.base import (
     FrontierSearchAlgorithm, PopulationAlgorithm, SearchNode,
 )
 from mdp.cy_rollout import CYRandomRolloutEngine
-from mdp.cy_state_record import CyStateRecord
+from mdp.cy_state_record import CyStateRecord, evaluation_state_key, two_face_state_key
 
 
 RESULT_FORMAT_VERSION = 2
@@ -44,11 +44,25 @@ class RolloutResult:
     termination_reason: str
 
 
+@dataclass(frozen=True)
+class TwoFaceRolloutResult(RolloutResult):
+    initial_evaluation_state_key: str
+    best_evaluation_state_key: str
+
+
 class _RolloutSession:
     """One budget and best tracker, shared by both algorithm interfaces."""
 
     def __init__(self, initial_state, engine, *, identity, objective_function, objective_goal,
-                 objective_name, objective_budget, on_query, on_transition, on_expansion):
+                 objective_name, objective_budget, on_query, on_transition, on_expansion,
+                 two_face_state=False):
+        if type(two_face_state) is not bool:
+            raise ValueError("two_face_state must be a boolean.")
+        if two_face_state and objective_name != "max_kcup":
+            raise ValueError("two_face_state currently supports only max_kcup.")
+        if two_face_state != getattr(engine, "two_face_state", False):
+            raise ValueError("rollout two_face_state must match the geometry engine setting.")
+        self.two_face_state = two_face_state
         self.engine = engine
         self.identity = identity
         self.objective_function = objective_function
@@ -59,7 +73,16 @@ class _RolloutSession:
         self.queries = self.moves = self.expansions = 0
         self.source = initial_state
         self.best_key = initial_state.key
+        self.best_evaluation_key = self.state_key(initial_state)
         self.best_value = None
+
+    def state_key(self, state):
+        return evaluation_state_key(state, self.two_face_state)
+
+    def transition_key(self, source, transition):
+        if not self.two_face_state:
+            return transition.next_key
+        return two_face_state_key(source.configuration, transition.simplices_from(source.simplices))
 
     @property
     def remaining_budget(self) -> int:
@@ -72,6 +95,9 @@ class _RolloutSession:
                  "state_key": state.key, "action": action}
         if metadata is not None:
             event.update(metadata)
+        if self.two_face_state:
+            event.update(evaluation_state_key=self.state_key(state), source_evaluation_state_key=(
+                self.state_key(self.source) if event["source_key"] is not None else None))
         try:
             value = float((objective_function or self.objective_function)(state))
             if not math.isfinite(value) or (self.objective_name == "max_kcup" and value <= 0):
@@ -82,9 +108,11 @@ class _RolloutSession:
             raise
         if self.best_value is None or (value > self.best_value if self.goal == "max" else value < self.best_value):
             self.best_key, self.best_value = state.key, value
+            self.best_evaluation_key = self.state_key(state)
         if self.on_query is not None:
             self.on_query({**event, "status": "ok", "objective": value,
-                           "best_objective": self.best_value, "best_state_key": self.best_key})
+                           "best_objective": self.best_value, "best_state_key": self.best_key,
+                           **({"best_evaluation_state_key": self.best_evaluation_key} if self.two_face_state else {})})
         return value
 
     @contextmanager
@@ -99,6 +127,8 @@ class _RolloutSession:
         event = {**self.identity, "expansion_index": self.expansions, "depth": node.depth,
                  "state_key": node.state.key, "objective": node.objective,
                  "queries_before": queries_before}
+        if self.two_face_state:
+            event["evaluation_state_key"] = self.state_key(node.state)
         try:
             if prepared is None:
                 actions_by_state, _ = self.engine.candidate_actions_for_states([node.state])
@@ -144,16 +174,23 @@ class _RolloutSession:
                                 "round_queries": self.queries - queries_before, "source_key": current.state.key,
                                 "state_key": selected.state.key, "action": selected.action,
                                 "objective": selected.objective, "best_objective": self.best_value,
-                                "best_state_key": self.best_key})
+                                "best_state_key": self.best_key,
+                                **(dict(source_evaluation_state_key=self.state_key(current.state),
+                                        evaluation_state_key=self.state_key(selected.state),
+                                        best_evaluation_state_key=self.best_evaluation_key)
+                                   if self.two_face_state else {})})
         return SearchNode(selected.state, selected.objective, selected.query_index, current.depth + 1)
 
     def result(self, initial: SearchNode, reason: str) -> RolloutResult:
-        return RolloutResult(
+        result_type = TwoFaceRolloutResult if self.two_face_state else RolloutResult
+        return result_type(
             **self.identity, objective_name=self.objective_name, objective_goal=self.goal,
             objective_budget=self.budget, objective_queries=self.queries, transition_count=self.moves,
             expansion_count=self.expansions, budget_overshoot=max(0, self.queries - self.budget),
             initial_state_key=initial.state.key, best_state_key=self.best_key,
             initial_objective=initial.objective, best_objective=self.best_value, termination_reason=reason,
+            **(dict(initial_evaluation_state_key=self.state_key(initial.state),
+                    best_evaluation_state_key=self.best_evaluation_key) if self.two_face_state else {}),
         )
 
     def failure(self, exc) -> RuntimeError:
@@ -186,7 +223,7 @@ class _SearchContext:
         self._batch_objective_function = batch_objective_function
         self.initial = initial
         self.goal = session.goal
-        self._seen_keys = {initial.state.key}
+        self._seen_keys = {session.state_key(initial.state)}
 
     @property
     def remaining_budget(self) -> int:
@@ -203,7 +240,7 @@ class _SearchContext:
                                      materialized_states=materialized) as (context, transitions):
             actions, pending_keys = [], set()
             for action in context.actions:
-                key = transitions[action].next_key
+                key = self._session.transition_key(node.state, transitions[action])
                 if key in self._seen_keys or key in pending_keys:
                     continue
                 pending_keys.add(key)
@@ -215,7 +252,7 @@ class _SearchContext:
             try:
                 for action in actions:
                     evaluated = context.evaluate_action(action)
-                    self._seen_keys.add(evaluated.state.key)
+                    self._seen_keys.add(self._session.state_key(evaluated.state))
                     yield SearchNode(evaluated.state, evaluated.objective, evaluated.query_index, node.depth + 1)
             finally:
                 close = getattr(values, "close", None)
@@ -319,6 +356,7 @@ def run_rollout(
     policy=None,
     reward_function=None,
     batch_objective_function=None,
+    two_face_state: bool = False,
 ) -> RolloutResult:
     """Run one independent start, scoring all queried states toward the best.
 
@@ -342,6 +380,7 @@ def run_rollout(
             objective_budget=objective_budget, seeds=[seed], start_indices=[start_index],
             objective_name=objective_name, reward_function=reward_function,
             batch_objective_function=batch_objective_function,
+            two_face_state=two_face_state,
             on_query=on_query, on_transition=on_transition, on_expansion=on_expansion,
         )[0]
     identity = {"algorithm": algorithm.name, "polytope_index": initial_state.point_config_index,
@@ -350,6 +389,7 @@ def run_rollout(
         initial_state, engine, identity=identity, objective_function=objective_function,
         objective_goal=objective_goal, objective_name=objective_name, objective_budget=objective_budget,
         on_query=on_query, on_transition=on_transition, on_expansion=on_expansion,
+        two_face_state=two_face_state,
     )
     try:
         initial = SearchNode(initial_state, session.evaluate(initial_state, depth=0), 0, 0)

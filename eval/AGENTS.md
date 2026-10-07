@@ -138,6 +138,9 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 
 ### 搜索去重
 
+- `two_face_state=False` 为默认值，保持 full-FRST 身份与现有行为。开启时目前只支持 `max_kcup`；所有搜索 visited/discovered/reserved 身份与 objective 缓存使用各 ambient 2-face 的 canonical triangulation key。点标签与面集合由共享 geometry worker 提供，规范化复用 `mdp/cy_state_record.py`；不能将完整 simplices 的所有三点子集当作二维面表示。
+- 完整 FRST 与原始 `state.key` 仍用于几何定位、邻居展开和 actor/critic 输入；同类候选按现有提案/查询顺序保留首次成功查询代表与分数。Random/Greedy 与 GA 保留原重复查询计费。开关不参与 setup 校验，互异完整 FRST 起点允许属于同一二维面等价类，搜索历史仍逐起点独立。
+- 开启时，v2 查询/转移事件追加 `evaluation_state_key`、`source_evaluation_state_key`、`best_evaluation_state_key`，展开事件追加父节点 `evaluation_state_key`，rollout 追加 `initial_evaluation_state_key` / `best_evaluation_state_key`。Population query 的 source 仍为 null。关闭时不追加这些结果字段。离线 metric 验证按二维面 key 检查同类 volume 的一致性，数值求解相对容差为 `1e-6`；保留完整 key 的几何追溯与起点配对检查。旧结果缺少开关视为 False；并行/合并结果必须采用相同设置。
 - BeFS/Beam 在单个 `(algorithm, polytope_index, start_index)` 内按 canonical state key 全局去重，在 objective 查询之前跳过已发现状态。
 - 起点立即标为已发现；候选首次成功查询后标为已发现。Beam 丢弃的候选仍属于已发现状态，不能在后续层重新加入。
 - 去重排除自环、反向边、重复 action 和多父节点共享子节点；不能把重复邻居再次查询后再去重。

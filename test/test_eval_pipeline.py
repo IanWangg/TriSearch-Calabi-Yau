@@ -122,8 +122,8 @@ def test_pipeline_preserves_partial_results_and_closes_runtime_on_failure(monkey
     assert all(engine.history is None for engine in engines)
 
 
-@pytest.mark.parametrize("force_cpu", [True, False])
-def test_real_rl_checkpoint_batches_all_starts_and_preserves_cache_semantics(tmp_path, real_setup, force_cpu):
+@pytest.mark.parametrize("force_cpu,two_face_state", [(True, False), (False, False), (True, True)])
+def test_real_rl_checkpoint_batches_all_starts_and_preserves_cache_semantics(tmp_path, real_setup, force_cpu, two_face_state):
     import torch
     from eval.algorithm import RL_ALGORITHM_NAMES
     from eval.policy import EvaluationPolicy
@@ -133,19 +133,34 @@ def test_real_rl_checkpoint_batches_all_starts_and_preserves_cache_semantics(tmp
     if not (Path(EvaluationSpec.policy_checkpoint) / "latest.pth").exists():
         pytest.skip("Research checkpoint is not present in this checkout")
     spec, setup = real_setup
-    spec = replace(spec, algorithms=RL_ALGORITHM_NAMES, beam_width=2, objective_budget=8, force_cpu=force_cpu)
+    spec = replace(spec, algorithms=RL_ALGORITHM_NAMES, beam_width=2, objective_budget=8,
+                   force_cpu=force_cpu, two_face_state=two_face_state)
     policy = EvaluationPolicy.from_spec(spec)
     cached = run_evaluation(spec, setup, output_dir=tmp_path / "rl_cached", policy=policy)
     cold_spec = replace(spec, cache_states=False, algorithms=tuple(reversed(spec.algorithms)))
     cold = run_evaluation(cold_spec, setup, output_dir=tmp_path / "rl_cold", policy=policy)
     order = lambda result: (result.algorithm, result.start_index)
-    assert sorted(cached.rollouts, key=order) == sorted(cold.rollouts, key=order)
+
+    def assert_same_records(first, second):
+        for left, right in zip(first, second, strict=True):
+            right = dict(right)
+            # Equivalent full representatives can change the last floating-point
+            # bits of a KCUP solve. All identities, actions and counts stay exact.
+            if two_face_state:
+                for field in ("objective", "initial_objective", "best_objective"):
+                    if field in left:
+                        assert left[field] == pytest.approx(right[field], rel=1e-6)
+                        right[field] = left[field]
+            assert left == right
+
+    assert_same_records([asdict(row) for row in sorted(cached.rollouts, key=order)],
+                        [asdict(row) for row in sorted(cold.rollouts, key=order)])
     for filename in ("queries.jsonl", "expansions.jsonl", "transitions.jsonl"):
         first, second = read_jsonl(cached.output_dir / filename), read_jsonl(cold.output_dir / filename)
         for algorithm in spec.algorithms:
             for start in range(spec.num_starts):
                 select = lambda rows: [row for row in rows if row["algorithm"] == algorithm and row["start_index"] == start]
-                assert select(first) == select(second)
+                assert_same_records(select(first), select(second))
     summary = json.loads((cached.output_dir / "summary.json").read_text())
     assert summary["num_rollouts"] == len(spec.algorithms) * spec.num_starts
     assert all(stats["max_logical_batch_states"] >= 2 for stats in summary["policy_stats"].values())
@@ -163,8 +178,14 @@ def test_real_rl_checkpoint_batches_all_starts_and_preserves_cache_semantics(tmp
     stochastic = [row for row in read_jsonl(cached.output_dir / "queries.jsonl")
                   if row["algorithm"] == "rl_stochastic_policy"]
     for start in range(spec.num_starts):
-        keys = [row["state_key"] for row in stochastic if row["start_index"] == start]
+        identity_field = "evaluation_state_key" if two_face_state else "state_key"
+        keys = [row[identity_field] for row in stochastic if row["start_index"] == start]
         assert len(keys) == len(set(keys))
+    if two_face_state:
+        from eval.results.plotting import read_comparison
+
+        for result in (cached, cold):
+            assert len(read_comparison(result.output_dir).rollouts) == len(spec.algorithms) * spec.num_starts
     stats = json.loads((cold.output_dir / "summary.json").read_text())["runtime_stats"]
     assert all(row["resident_graph_nodes"] == row["objective_cache_bytes"] == row["hot_state_bytes"] == 0
                for row in stats.values())
@@ -269,15 +290,16 @@ def test_hugging_face_kcup_smoke(tmp_path):
     assert results[0] == results[1]
 
 
-@pytest.mark.parametrize("names", [("random", "greedy"), ("rl_value_beam_search", "rl_value_best_first")])
-def test_parallel_cli_preserves_shared_starts_and_sequential_results(tmp_path, real_setup, names):
+@pytest.mark.parametrize("names,two_face_state", [(("random", "greedy"), False),
+    (("rl_value_beam_search", "rl_value_best_first"), False), (("random", "greedy"), True)])
+def test_parallel_cli_preserves_shared_starts_and_sequential_results(tmp_path, real_setup, names, two_face_state):
     from eval.parallel import run_parallel_evaluation
     from eval.results.plotting import read_comparison
 
     spec, setup = real_setup
     if "rl_value_best_first" in names and not (Path(EvaluationSpec.policy_checkpoint) / "latest.pth").exists():
         pytest.skip("Research checkpoint is not present in this checkout")
-    spec = replace(spec, algorithms=names, force_cpu=True)
+    spec = replace(spec, algorithms=names, force_cpu=True, two_face_state=two_face_state)
     resources = tmp_path / "resources.json"
     resources.write_text(json.dumps({name: dict(cpu_count=2, transition_num_workers=1, memory_budget_gb=8)
                                      for name in spec.algorithms}))
@@ -294,6 +316,7 @@ def test_parallel_cli_preserves_shared_starts_and_sequential_results(tmp_path, r
         config = json.loads((parallel.output_dir / "algorithms" / name / "config.json").read_text())
         assert config["spec"]["memory_budget_gb"] == 8
         assert config["setup_id"] == setup.setup_id
+        assert config["spec"]["two_face_state"] is two_face_state
 
 
 def test_parallel_failure_records_context_and_terminates_other_children(tmp_path, real_setup, monkeypatch):

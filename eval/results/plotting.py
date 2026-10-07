@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 import os
@@ -29,7 +29,9 @@ EARLY_STOP_REASONS = {"no_neighbors", "no_unvisited_neighbors", "frontier_exhaus
                       "dna_space_singleton", "no_feasible_offspring"}
 
 COMPARISON_FIELDS = ("num_polytopes", "num_starts", "h11", "objective_budget", "seed",
-                     "reward_function", "beam_width", "policy_proposal_count", "value_discount")
+                     "reward_function", "beam_width", "policy_proposal_count", "value_discount", "two_face_state")
+
+TWO_FACE_METRIC_REL_TOL = 1e-6
 
 
 @dataclass
@@ -39,6 +41,7 @@ class ComparisonData:
     rollouts: dict[tuple[str, int, int], dict]
     curves: dict[tuple[str, int, int], np.ndarray]
     policy_checkpoint_sha256: str | None = None
+    evaluation_objectives: dict[str, float] = field(default_factory=dict)
 
     @property
     def polytopes(self):
@@ -62,6 +65,24 @@ def _positive(value):
     return float(value)
 
 
+def _evaluation_key(row, name):
+    key = row.get(name)
+    if not isinstance(key, str) or not key.startswith("two_face|"):
+        raise ValueError(f"Missing or invalid {name} in two_face_state results.")
+    return key
+
+
+def _record_evaluation_objective(data, key, value):
+    previous = data.evaluation_objectives.setdefault(key, value)
+    if not math.isclose(previous, value, rel_tol=TWO_FACE_METRIC_REL_TOL):
+        raise ValueError(f"Inconsistent max_kcup metric for 2-face state {key}.")
+
+
+def _merge_evaluation_objectives(data, child):
+    for key, value in child.evaluation_objectives.items():
+        _record_evaluation_objective(data, key, value)
+
+
 def _check_pairs(data):
     spec = data.spec
     expected = {(algorithm, polytope, start) for algorithm in spec["algorithms"]
@@ -76,6 +97,10 @@ def _check_pairs(data):
             if any(row["initial_state_key"] != first["initial_state_key"] or not math.isclose(
                     row["initial_objective"], first["initial_objective"], rel_tol=1e-9) for row in paired):
                 raise ValueError(f"Unpaired initial states/objectives at polytope={polytope}, start={start}.")
+            if spec.get("two_face_state", False) and any(
+                    _evaluation_key(row, "initial_evaluation_state_key") !=
+                    _evaluation_key(first, "initial_evaluation_state_key") for row in paired):
+                raise ValueError(f"Unpaired 2-face initial states at polytope={polytope}, start={start}.")
             initial_keys.add(first["initial_state_key"])
         if len(initial_keys) != spec["num_starts"]:
             raise ValueError(f"Duplicate initial states at polytope={polytope}.")
@@ -89,7 +114,7 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
         manifest = json.loads(manifest_path.read_text())
         if manifest.get("format_version") != 1 or manifest.get("status") != "complete":
             raise ValueError("Parallel benchmark is incomplete or has an unsupported format.")
-        data = ComparisonData(manifest["spec"], manifest["setup_id"], {}, {})
+        data = ComparisonData({"two_face_state": False, **manifest["spec"]}, manifest["setup_id"], {}, {})
         if set(manifest["jobs"]) != set(data.spec["algorithms"]):
             raise ValueError("Parallel benchmark is missing algorithms.")
         for algorithm, job in manifest["jobs"].items():
@@ -116,6 +141,7 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
                 data.policy_checkpoint_sha256 = checkpoint
             data.rollouts.update(child.rollouts)
             data.curves.update(child.curves)
+            _merge_evaluation_objectives(data, child)
         _check_pairs(data)
         return data
 
@@ -128,7 +154,9 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
         raise ValueError("Unsupported or inconsistent evaluation result format_version.")
     if summary.get("status") != "complete" or summary.get("setup_id") != config["setup_id"]:
         raise ValueError("Evaluation summary is incomplete or has a mismatched setup.")
-    spec = config["spec"]
+    spec = {"two_face_state": False, **config["spec"]}
+    if type(spec["two_face_state"]) is not bool:
+        raise ValueError("Invalid two_face_state in evaluation results.")
     if spec["reward_function"] != "max_kcup":
         raise ValueError("Volume comparisons currently require reward_function=max_kcup.")
     budget = spec["objective_budget"]
@@ -148,6 +176,9 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
             raise ValueError(f"Invalid early termination: {key}.")
         _positive(row["initial_objective"])
         _positive(row["best_objective"])
+        if spec["two_face_state"]:
+            _evaluation_key(row, "initial_evaluation_state_key")
+            _evaluation_key(row, "best_evaluation_state_key")
         data.rollouts[key] = row
         data.curves[key] = np.empty(budget + 1, dtype=float)
     _check_pairs(data)
@@ -156,6 +187,7 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
     counts = dict.fromkeys(data.rollouts, -1)
     best = dict.fromkeys(data.rollouts, -math.inf)
     best_keys = {}
+    best_evaluation_keys = {}
     for event in _read_jsonl(run_dir / "queries.jsonl"):
         key = _key(event)
         q = event["query_index"]
@@ -164,8 +196,13 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
         if event["status"] != "ok" or event["is_initial"] != (q == 0):
             raise ValueError(f"Failed or invalid query: {key}, q={q}.")
         value = _positive(event["objective"])
+        if spec["two_face_state"]:
+            evaluation_key = _evaluation_key(event, "evaluation_state_key")
+            _record_evaluation_objective(data, evaluation_key, value)
         if value > best[key]:
             best[key], best_keys[key] = value, event["state_key"]
+            if spec["two_face_state"]:
+                best_evaluation_keys[key] = evaluation_key
         if not math.isclose(_positive(event["best_objective"]), best[key], rel_tol=1e-9):
             raise ValueError(f"Inconsistent cumulative best: {key}, q={q}.")
         row = data.rollouts[key]
@@ -174,6 +211,11 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
             raise ValueError(f"Initial query differs from rollout: {key}.")
         if event["best_state_key"] != best_keys[key]:
             raise ValueError(f"Inconsistent best state key: {key}, q={q}.")
+        if spec["two_face_state"]:
+            if q == 0 and evaluation_key != row["initial_evaluation_state_key"]:
+                raise ValueError(f"Initial 2-face query differs from rollout: {key}.")
+            if _evaluation_key(event, "best_evaluation_state_key") != best_evaluation_keys[key]:
+                raise ValueError(f"Inconsistent best 2-face state key: {key}, q={q}.")
         if q <= budget:
             data.curves[key][q] = best[key]
         counts[key] = q
@@ -182,6 +224,8 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
             raise ValueError(f"Missing queries: {key}.")
         if not math.isclose(best[key], row["best_objective"], rel_tol=1e-9) or best_keys[key] != row["best_state_key"]:
             raise ValueError(f"Rollout best differs from queries: {key}.")
+        if spec["two_face_state"] and row["best_evaluation_state_key"] != best_evaluation_keys[key]:
+            raise ValueError(f"Rollout best 2-face state differs from queries: {key}.")
         if counts[key] < budget:
             data.curves[key][counts[key] + 1:] = best[key]
     for field in ("objective_queries", "budget_overshoot", "transition_count", "expansion_count"):
@@ -222,6 +266,7 @@ def combine_comparisons(run_dirs) -> ComparisonData:
             combined.spec.update({key: value for key, value in child.spec.items() if key.startswith("ga_")})
         combined.rollouts.update(child.rollouts)
         combined.curves.update(child.curves)
+        _merge_evaluation_objectives(combined, child)
     _check_pairs(combined)
     return combined
 

@@ -55,6 +55,11 @@ def parse_args(argv=None):
     from reward_functions import SUPPORTED_REWARDS
 
     parser.add_argument("--reward_function", choices=SUPPORTED_REWARDS, default="max_kcup")
+    representation = parser.add_mutually_exclusive_group()
+    representation.add_argument("--two_face_state", action="store_true",
+                                help="Use 2-face equivalence for search deduplication and max_kcup caching/validation; keep full FRSTs for geometry and policy inference.")
+    representation.add_argument("--no_two_face_state", dest="two_face_state", action="store_false")
+    parser.set_defaults(two_face_state=False)
     cache = parser.add_mutually_exclusive_group()
     cache.add_argument("--cache_states", dest="cache_states", action="store_true")
     cache.add_argument("--no_cache_states", dest="cache_states", action="store_false",
