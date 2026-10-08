@@ -34,3 +34,10 @@ data/cy/output*/
 ckpt/runs/
 !ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/
 !ckpt/cy_subcomplex_ppo_improved_512state_20rollout_actor_gnn_rollout_aug_count_bonus0p1_exp0p5_randomflipdata_d4/*.pth
+
+# Two-face model study sources; generated inputs and runs stay ignored.
+!/eval/sweep/two_face_model/
+/eval/sweep/two_face_model/*
+!/eval/sweep/two_face_model/README.md
+!/eval/sweep/two_face_model/configs/
+!/eval/sweep/two_face_model/scripts/

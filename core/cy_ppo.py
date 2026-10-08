@@ -14,6 +14,8 @@ from core.cy_policy_inference import (
     evaluate_policy_actions_from_data_list,
     build_cy_data_list,
     policy_data_chunks,
+    policy_observation_kind,
+    validate_policy_observations,
 )
 from core.training_types import PPOTrainStats
 from mdp.cy_graph import CanonicalAction
@@ -33,6 +35,7 @@ class PreparedPPORolloutBatch:
     advantages: torch.Tensor
     value_targets: torch.Tensor
     data_buffer_list: List[Data] | None = None
+    observation_kind: str = "full_triangulation"
 
 
 @dataclass
@@ -48,8 +51,19 @@ class PPORolloutBuffer:
     reward_buffer: List[torch.Tensor] = field(default_factory=list)
     done_buffer: List[torch.Tensor] = field(default_factory=list)
     valid_mask_buffer: List[torch.Tensor] = field(default_factory=list)
+    observation_kind: str | None = None
 
     def append(self, step_result: PolicyRolloutStepResult) -> None:
+        kinds = {getattr(data, "observation_kind", "full_triangulation")
+                 for data in (step_result.data_list or [])}
+        declared = getattr(step_result, "observation_kind", None)
+        if declared is not None:
+            kinds.add(declared)
+        if not kinds:
+            kinds.add(self.observation_kind or "full_triangulation")
+        if len(kinds) != 1 or (self.observation_kind is not None and self.observation_kind not in kinds):
+            raise ValueError("Cannot mix observation schemas in a PPO rollout buffer.")
+        self.observation_kind = kinds.pop()
         reward_values = (
             step_result.training_rewards
             if step_result.training_rewards is not None
@@ -75,7 +89,9 @@ class PPORolloutBuffer:
     def clear(self) -> None:
         """Release observations immediately after the associated PPO update."""
         for name in self.__dataclass_fields__:
-            getattr(self, name).clear()
+            if name != "observation_kind":
+                getattr(self, name).clear()
+        self.observation_kind = None
 
     def prepare(
         self,
@@ -99,7 +115,8 @@ class PPORolloutBuffer:
                 if step_data is None:
                     self.data_buffer[index] = build_cy_data_list(
                         self.state_buffer[index], self.candidate_buffer[index],
-                        include_simplex_topology=True,
+                        include_simplex_topology=self.observation_kind != "two_face",
+                        observation_kind=self.observation_kind or "full_triangulation",
                     )
                     self.state_buffer[index] = [None] * num_states
                     self.candidate_buffer[index] = [()] * num_states
@@ -122,6 +139,7 @@ class PPORolloutBuffer:
         )
 
         return PreparedPPORolloutBatch(
+            observation_kind=self.observation_kind or "full_triangulation",
             state_buffer_list=flatten_buffer(self.state_buffer, rollout_length, num_states),
             candidate_buffer_list=flatten_buffer(self.candidate_buffer, rollout_length, num_states),
             action_buffer_flat=flatten_action_buffer(self.action_buffer, rollout_length, num_states, device=device),
@@ -228,6 +246,10 @@ def train_policy_from_rollout(
     max_graph_size: int | None = None,
     memory_guard=None,
 ) -> PPOTrainStats:
+    if prepared_rollout.observation_kind != policy_observation_kind(policy):
+        raise ValueError("PPO rollout observation schema does not match the policy.")
+    if prepared_rollout.data_buffer_list is not None:
+        validate_policy_observations(prepared_rollout.data_buffer_list, policy)
     state_buffer_list = prepared_rollout.state_buffer_list
     candidate_buffer_list = prepared_rollout.candidate_buffer_list
     data_buffer_list = prepared_rollout.data_buffer_list
@@ -277,6 +299,7 @@ def train_policy_from_rollout(
                 mini_data = build_cy_data_list(
                     [state_buffer_list[idx] for idx in mini_batch_indices],
                     [candidate_buffer_list[idx] for idx in mini_batch_indices],
+                    observation_kind=prepared_rollout.observation_kind,
                     include_simplex_topology=(getattr(policy, "value_feature_source", "") == "snn_simplex"
                                               or getattr(policy, "subcomplex_actor_type", "") == "snn_simplex"),
                 )

@@ -306,6 +306,8 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         )
 
         self.subcomplex_actor_type = self._normalize_subcomplex_actor_type(subcomplex_actor_type)
+        if self.subcomplex_actor_type == "two_face_deep_sets":
+            raise ValueError("Use build_subcomplex_agent to construct the two_face_deep_sets policy.")
         self.value_feature_source = self._value_feature_source_for_actor(self.subcomplex_actor_type)
         if self.subcomplex_actor_type == "snn_simplex":
             self.snn_simplex_actor = SNNSimplexActor(

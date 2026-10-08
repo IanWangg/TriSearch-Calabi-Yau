@@ -31,6 +31,12 @@ class EvaluationPolicy:
         self.model = model.to(self.device).eval()
         self.max_graph_size = max_graph_size
         self.metadata = dict(metadata or {})
+        self.observation_kind = getattr(model, "observation_kind", "full_triangulation")
+        self.metadata.update(
+            policy_observation_kind=self.observation_kind,
+            policy_observation_schema_version=getattr(model, "observation_schema_version", 1),
+            model_parameter_count=sum(parameter.numel() for parameter in model.parameters()),
+        )
         self.reset_stats()
 
     @classmethod

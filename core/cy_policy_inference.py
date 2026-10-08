@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Sequence, Tuple
 
@@ -9,6 +10,7 @@ import torch
 from torch_geometric.data import Batch, Data
 
 from core.cy_data_utils import create_data_from_cy_state_with_subcomplex, get_cached_transformed_vertices
+from core.cy_two_face_data import create_two_face_data_from_state
 from core.vertex_augmentation import SimilarityTransform
 from core.vertex_preprocessing import VertexPreprocessor
 from mdp.cy_graph import CanonicalAction
@@ -61,7 +63,9 @@ def policy_data_chunks(data_list: Sequence[Data], *, max_graph_size: int | None 
         width = int(candidates.size(-1))
         graph_cost = int(data.x.size(0) + data.edge_index.size(1))
         graph_cost += int(candidates.size(0)) * max(1, width * width)
-        for name in ("simplex_vertices", "snn_laplacian_row", "snn_candidate"):
+        for name in ("simplex_vertices", "snn_laplacian_row", "snn_candidate",
+                     "node_face", "triangle_vertices", "triangle_face", "triangle_edge_index",
+                     "action_face", "removed_triangle_ids", "added_triangle_vertices"):
             value = getattr(data, name, None)
             if isinstance(value, torch.Tensor):
                 graph_cost += value.numel()
@@ -102,6 +106,19 @@ def _ensure_policy_device(policy: Any, device: torch.device) -> Any:
     return policy.to(device)
 
 
+def policy_observation_kind(policy: Any) -> str:
+    return str(getattr(policy, "observation_kind", "full_triangulation"))
+
+
+def validate_policy_observations(data_list, policy):
+    expected = policy_observation_kind(policy)
+    for data in data_list:
+        if getattr(data, "observation_kind", "full_triangulation") != expected:
+            raise ValueError("PPO/inference observation schema does not match the policy.")
+        if expected == "two_face" and data.observation_schema_version != policy.observation_schema_version:
+            raise ValueError("Unsupported two_face observation schema version.")
+
+
 def _policy_uses_simplex_topology(policy: Any) -> bool:
     return (
         str(getattr(policy, "subcomplex_actor_type", "")).strip().lower() == "snn_simplex"
@@ -132,6 +149,7 @@ def build_cy_data_list(
     vertex_preprocessor: VertexPreprocessor | None = None,
     trajectory_transforms: Sequence[SimilarityTransform] | None = None,
     include_simplex_topology: bool = False,
+    observation_kind: str = "full_triangulation",
 ) -> List[Data]:
     if len(states) != len(action_lists):
         raise ValueError("states and action_lists must have the same length.")
@@ -139,6 +157,17 @@ def build_cy_data_list(
         raise ValueError("trajectory_transforms must have one transform per state.")
     if len(states) == 0:
         return []
+
+    if observation_kind == "two_face":
+        if subcomplex_width not in (None, 4):
+            raise ValueError("two_face observation requires action width 4.")
+        if trajectory_transforms is not None or (vertex_preprocessor is not None and vertex_preprocessor.mode != "none"):
+            raise ValueError("two_face v1 requires raw coordinates without preprocessing or augmentation.")
+        if include_simplex_topology:
+            raise ValueError("two_face observation cannot include full simplex topology.")
+        return [create_two_face_data_from_state(state, actions) for state, actions in zip(states, action_lists)]
+    if observation_kind != "full_triangulation":
+        raise ValueError(f"Unknown observation_kind {observation_kind!r}.")
 
     width = infer_batch_subcomplex_width(states, action_lists) if subcomplex_width is None else int(subcomplex_width)
     data_list = [
@@ -211,6 +240,7 @@ class PolicyRolloutStepResult:
     data_list: List[Data] | None = None
     intrinsic_bonus: List[float] | None = None
     training_rewards: List[float] | None = None
+    observation_kind: str = "full_triangulation"
 
 
 @dataclass(frozen=True)
@@ -235,6 +265,7 @@ class PolicyActionEvaluationResult:
 
 def _forward_policy_data(data_list: Sequence[Data], policy: Any, *, device: torch.device,
                          value_only: bool = False, max_graph_size: int | None = None):
+    validate_policy_observations(data_list, policy)
     values, logits = [], []
     transfer_sec = inference_sec = 0.0
     max_candidates = max(_data_num_available_subcomplexes(data) for data in data_list)
@@ -295,7 +326,11 @@ def evaluate_policy_scores(
         return PolicyScoreResult(torch.empty(0, device=device), None, 0.0, 0.0, 0.0, 0)
     policy = _ensure_policy_device(policy, device)
     start = time.perf_counter()
-    data = build_cy_data_list(states, action_lists, include_simplex_topology=_policy_uses_simplex_topology(policy))
+    data = build_cy_data_list(
+        states, [()] * len(states) if value_only and policy_observation_kind(policy) == "two_face" else action_lists,
+        include_simplex_topology=_policy_uses_simplex_topology(policy),
+        observation_kind=policy_observation_kind(policy),
+    )
     build_sec = time.perf_counter() - start
     with torch.inference_mode():
         values, logits, transfer_sec, inference_sec = _forward_policy_data(
@@ -325,7 +360,8 @@ def batched_policy_action_selection(
     candidate_lists = [tuple(tuple(int(v) for v in action) for action in actions) for actions in action_lists]
 
     data_build_start = time.perf_counter()
-    subcomplex_width = infer_batch_subcomplex_width(states, candidate_lists)
+    subcomplex_width = (4 if policy_observation_kind(policy) == "two_face"
+                        else infer_batch_subcomplex_width(states, candidate_lists))
     full_data_list = build_cy_data_list(
         states,
         candidate_lists,
@@ -333,6 +369,7 @@ def batched_policy_action_selection(
         vertex_preprocessor=vertex_preprocessor,
         trajectory_transforms=trajectory_transforms,
         include_simplex_topology=include_simplex_topology,
+        observation_kind=policy_observation_kind(policy),
     )
     data_build_sec = time.perf_counter() - data_build_start
 
@@ -554,6 +591,7 @@ def rollout_step_with_policy(
         policy_action_inference_sec=selection.policy_inference_sec,
         transition_apply_sec=transition_apply_sec,
         data_list=selection.data_list,
+        observation_kind=policy_observation_kind(policy),
     )
 
 
@@ -580,6 +618,7 @@ def evaluate_policy_values(
         vertex_preprocessor=vertex_preprocessor,
         trajectory_transforms=trajectory_transforms,
         include_simplex_topology=include_simplex_topology,
+        observation_kind=policy_observation_kind(policy),
     )
     data_build_sec = time.perf_counter() - data_build_start
 
@@ -618,29 +657,8 @@ def _data_subcomplex_width(data: Data) -> int:
 
 
 def _copy_data_with_subcomplex_vertices(data: Data, subcomplex_vertices: torch.Tensor) -> Data:
-    copied = Data(
-        x=data.x,
-        edge_index=data.edge_index,
-        subcomplex_vertices=subcomplex_vertices,
-        num_available_subcomplexes=data.num_available_subcomplexes,
-    )
-    if hasattr(data, "simplex_vertices"):
-        copied.simplex_vertices = data.simplex_vertices
-    if hasattr(data, "num_top_simplices"):
-        copied.num_top_simplices = data.num_top_simplices
-    for attr_name in (
-        "snn_laplacian_row",
-        "snn_laplacian_col",
-        "snn_laplacian_value",
-        "num_snn_laplacian_entries",
-        "snn_candidate",
-        "snn_simplex",
-        "num_snn_candidate_simplex_memberships",
-    ):
-        if hasattr(data, attr_name):
-            setattr(copied, attr_name, getattr(data, attr_name))
-    copied.edge_attr = getattr(data, "edge_attr", None)
-    copied.num_edges = getattr(data, "num_edges", data.edge_index.size(1))
+    copied = copy(data)
+    copied.subcomplex_vertices = subcomplex_vertices
     return copied
 
 
@@ -751,6 +769,7 @@ def evaluate_policy_actions(
         vertex_preprocessor=vertex_preprocessor,
         trajectory_transforms=trajectory_transforms,
         include_simplex_topology=include_simplex_topology,
+        observation_kind=policy_observation_kind(policy),
     )
     data_build_sec = time.perf_counter() - data_build_start
 

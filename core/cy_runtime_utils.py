@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+from pathlib import Path
 from typing import Iterable, Optional
 
 import numpy as np
@@ -82,6 +83,9 @@ def _resolve_policy_device(policy) -> torch.device:
 
 
 def load_policy_checkpoint(policy, checkpoint_path: str, map_location=None):
+    from core.cy_checkpointing import validate_policy_model_config
+
+    validate_policy_model_config(policy, Path(checkpoint_path).parent)
     if map_location is None:
         map_location = _resolve_policy_device(policy)
     try:

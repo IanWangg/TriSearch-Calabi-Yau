@@ -14,6 +14,7 @@ from core.cy_checkpointing import (
     find_latest_policy_checkpoint,
     save_iteration_checkpoints,
     save_policy_checkpoint,
+    validate_policy_model_config,
 )
 from core.cy_data_utils import (
     get_cy_data_tensor_cache_stats,
@@ -47,6 +48,7 @@ from core.cy_training_config import (
     validate_count_bonus_args,
     validate_cy_volume_reward_transform_args,
     validate_neighbor_mode_args,
+    validate_two_face_training_args,
     validate_similarity_aug_args,
 )
 from core.cy_training_metrics import (
@@ -139,6 +141,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
     )
     validate_count_bonus_args(args)
     validate_neighbor_mode_args(args)
+    validate_two_face_training_args(args)
     validate_cy_volume_reward_transform_args(args)
     set_seeds(args.seed)
     if args.dry_run:
@@ -185,6 +188,8 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
     rows = load_cy_sample_rows(dataset_path, max_rows=args.max_rows)
     dataset_coordinate_dim = infer_dataset_coordinate_dim(rows)
     resolved_in_channels = resolve_policy_in_channels(rows, args.in_channels)
+    if args.observation_kind == "two_face" and resolved_in_channels != 4:
+        raise ValueError("two_face_deep_sets training requires 4D max_kcup data.")
     split = split_rows_by_vertex_count(rows, num_eval_polytopes=args.num_eval_polytopes)
     print(
         "Dataset split: "
@@ -201,12 +206,14 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
     build_start = time.perf_counter()
     train_collection = build_cy_rollout_collection(
         split.train_rows,
+        include_two_face_metadata=args.observation_kind == "two_face",
         include_points_interior_to_facets=args.include_points_interior_to_facets,
         neighbor_mode=args.neighbor_mode,
         transition_pool=transition_pool,
     )
     eval_collection = build_cy_rollout_collection(
         split.eval_rows,
+        include_two_face_metadata=args.observation_kind == "two_face",
         include_points_interior_to_facets=args.include_points_interior_to_facets,
         neighbor_mode=args.neighbor_mode,
         transition_pool=transition_pool,
@@ -274,6 +281,9 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
     print(f"Using policy in_channels={resolved_in_channels}")
     print(f"Using subcomplex_actor_type={subcomplex_actor_type}")
     print(f"Using value_feature_source={value_feature_source}")
+    print(f"Policy observation_kind={args.observation_kind} "
+          f"parameters={sum(parameter.numel() for parameter in policy.parameters())}")
+    validate_policy_model_config(policy, checkpoint_dir, allow_create=True)
     latest_policy_checkpoint = find_latest_policy_checkpoint(checkpoint_dir)
     if latest_policy_checkpoint is not None:
         print(f"Loading policy checkpoint from {latest_policy_checkpoint}")
@@ -308,6 +318,9 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                 "resolved_in_channels": resolved_in_channels,
                 "subcomplex_actor_type": subcomplex_actor_type,
                 "value_feature_source": value_feature_source,
+                "policy_observation_kind": args.observation_kind,
+                "policy_observation_schema_version": getattr(policy, "observation_schema_version", 1),
+                "model_parameter_count": sum(parameter.numel() for parameter in policy.parameters()),
                 "objective_goal": objective_goal,
                 "train_polytopes": len(split.train_polytope_indices),
                 "eval_polytopes": len(split.eval_polytope_indices),
@@ -404,13 +417,17 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
             )
 
             bootstrap_start = time.perf_counter()
-            bootstrap_action_lists, bootstrap_expand_summary = train_engine.candidate_actions_for_states(
-                rollout_summary.final_states,
-                use_multiprocessing=bool(args.use_multiprocessing),
-                transition_pool=transition_pool,
-                transition_mp_chunksize=int(args.transition_mp_chunksize),
-                transition_mp_min_batch=int(args.transition_mp_min_batch),
-            )
+            bootstrap_expand_summary = None
+            if args.observation_kind == "two_face":
+                bootstrap_action_lists = [()] * len(rollout_summary.final_states)
+            else:
+                bootstrap_action_lists, bootstrap_expand_summary = train_engine.candidate_actions_for_states(
+                    rollout_summary.final_states,
+                    use_multiprocessing=bool(args.use_multiprocessing),
+                    transition_pool=transition_pool,
+                    transition_mp_chunksize=int(args.transition_mp_chunksize),
+                    transition_mp_min_batch=int(args.transition_mp_min_batch),
+                )
             bootstrap_value_result = evaluate_policy_values(
                 rollout_summary.final_states,
                 bootstrap_action_lists,
@@ -631,7 +648,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                     "system/data_subcomplex_cache": data_cache_sizes["subcomplex"],
                     "timing/rollout_sec": rollout_sec,
                     "timing/bootstrap_sec": bootstrap_sec,
-                    "timing/bootstrap_expand_mp": float(bootstrap_expand_summary.used_multiprocessing),
+                    "timing/bootstrap_expand_mp": float(bootstrap_expand_summary.used_multiprocessing if bootstrap_expand_summary is not None else False),
                     "timing/bootstrap_value_build_sec": bootstrap_value_result.data_build_sec,
                     "timing/bootstrap_value_transfer_sec": bootstrap_value_result.batch_transfer_sec,
                     "timing/bootstrap_value_inference_sec": bootstrap_value_result.inference_sec,

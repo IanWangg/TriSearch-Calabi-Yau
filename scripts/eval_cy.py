@@ -57,7 +57,7 @@ def parse_args(argv=None):
     parser.add_argument("--reward_function", choices=SUPPORTED_REWARDS, default="max_kcup")
     representation = parser.add_mutually_exclusive_group()
     representation.add_argument("--two_face_state", action="store_true",
-                                help="Use 2-face equivalence for search deduplication and max_kcup caching/validation; keep full FRSTs for geometry and policy inference.")
+                                help="Use 2-face equivalence for search deduplication and max_kcup caching/validation; keep full FRSTs for geometry; network observation is selected by subcomplex_actor_type.")
     representation.add_argument("--no_two_face_state", dest="two_face_state", action="store_false")
     parser.set_defaults(two_face_state=False)
     cache = parser.add_mutually_exclusive_group()

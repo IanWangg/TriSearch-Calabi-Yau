@@ -7,6 +7,7 @@ CANONICAL_SUBCOMPLEX_ACTOR_TYPES = (
     "gnn",
     "circuit_pool",
     "snn_simplex",
+    "two_face_deep_sets",
 )
 SUBCOMPLEX_ACTOR_TYPE_ALIASES = {
     "default": DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
@@ -33,4 +34,11 @@ def normalize_subcomplex_actor_type(subcomplex_actor_type: str) -> str:
 
 def value_feature_source_for_subcomplex_actor(subcomplex_actor_type: str) -> str:
     resolved_actor_type = normalize_subcomplex_actor_type(subcomplex_actor_type)
+    if resolved_actor_type == "two_face_deep_sets":
+        return "two_face"
     return "snn_simplex" if resolved_actor_type == "snn_simplex" else "egnn"
+
+
+def observation_kind_for_subcomplex_actor(subcomplex_actor_type: str) -> str:
+    return ("two_face" if normalize_subcomplex_actor_type(subcomplex_actor_type) == "two_face_deep_sets"
+            else "full_triangulation")

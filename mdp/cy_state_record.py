@@ -31,8 +31,8 @@ def state_key(index: int, simplices: Iterable[Iterable[int]], neighbor_mode: str
     return key if neighbor_mode == "regular" else f"{neighbor_mode}|{key}"
 
 
-def two_face_state_key(configuration: "CYPointConfiguration", simplices: Iterable[Iterable[int]]) -> str:
-    """Identify a triangulation by its restrictions to the ambient 2-faces.
+def two_face_restrictions(configuration: "CYPointConfiguration", simplices: Iterable[Iterable[int]]) -> tuple:
+    """Return canonical immutable restrictions to the ambient 2-faces.
 
     Face labels come from CYTools in the worker. Intersecting each full simplex
     with these labels is the geometry-free equivalent of Triangulation.restrict.
@@ -50,7 +50,12 @@ def two_face_state_key(configuration: "CYPointConfiguration", simplices: Iterabl
         if not triangles:
             raise ValueError(f"Missing triangulation restriction for 2-face {labels}.")
         restrictions.append((tuple(sorted(labels)), canonical_simplices(triangles)))
-    return f"two_face|{configuration.index}:{tuple(restrictions)}"
+    return tuple(restrictions)
+
+
+def two_face_state_key(configuration: "CYPointConfiguration", simplices: Iterable[Iterable[int]]) -> str:
+    restrictions = two_face_restrictions(configuration, simplices)
+    return f"two_face|{configuration.index}:{restrictions}"
 
 
 def evaluation_state_key(state: "CyStateRecord", two_face_state: bool = False) -> str:

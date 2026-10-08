@@ -1,15 +1,48 @@
 from __future__ import annotations
 
 import os
+import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import torch
 
 
+def validate_policy_model_config(policy: Any, checkpoint_dir, *, allow_create: bool = False) -> None:
+    """Require exact architecture metadata for new policies; preserve legacy loads."""
+    directory = Path(checkpoint_dir)
+    path = directory / "model_config.json"
+    expected = getattr(policy, "model_config", None)
+    if path.exists():
+        actual = json.loads(path.read_text(encoding="utf-8"))
+        if actual != expected:
+            raise ValueError(f"Checkpoint model_config mismatch: {path}")
+        return
+    if expected is None:
+        return
+    if not allow_create or any(directory.glob("*.pth")):
+        raise ValueError(f"Missing model_config.json for two_face checkpoint directory: {directory}")
+    directory.mkdir(parents=True, exist_ok=True)
+    # Publish a complete file without replacing an existing configuration.
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, prefix="model_config_", suffix=".tmp",
+                                     encoding="utf-8", delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump(expected, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    try:
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            validate_policy_model_config(policy, directory)
+    finally:
+        temporary.unlink()
+
+
 def save_policy_checkpoint(policy: Any, checkpoint_path: str) -> None:
     path = Path(checkpoint_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    validate_policy_model_config(policy, path.parent, allow_create=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     torch.save(policy.state_dict(), str(tmp_path))
     os.replace(tmp_path, path)

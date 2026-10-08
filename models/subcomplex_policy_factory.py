@@ -69,6 +69,17 @@ def build_subcomplex_agent(
     resolved_model_type = normalize_subcomplex_model_type(model_type)
     resolved_actor_type = normalize_subcomplex_actor_type(subcomplex_actor_type)
 
+    if resolved_actor_type == "two_face_deep_sets":
+        if resolved_model_type != "egnn" or not share_encoder:
+            raise ValueError("two_face_deep_sets requires model_type='egnn' and share_encoder=True.")
+        from .two_face_agent import TwoFaceAgent
+
+        return TwoFaceAgent(
+            in_channels=in_channels, out_channels=out_channels, hidden_channels=hidden_channels,
+            num_layers=num_layers, triangle_num_layers=subcomplex_decoder_num_layers,
+            act=act, device=device,
+        )
+
     agent_cls = get_subcomplex_agent_class(resolved_model_type)
     kwargs = dict(
         in_channels=in_channels,
