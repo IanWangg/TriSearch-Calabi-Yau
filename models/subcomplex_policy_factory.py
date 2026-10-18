@@ -76,8 +76,7 @@ def build_subcomplex_agent(
 
         return TwoFaceAgent(
             in_channels=in_channels, out_channels=out_channels, hidden_channels=hidden_channels,
-            num_layers=num_layers, triangle_num_layers=subcomplex_decoder_num_layers,
-            act=act, device=device,
+            num_layers=num_layers, act=act, device=device,
         )
 
     agent_cls = get_subcomplex_agent_class(resolved_model_type)

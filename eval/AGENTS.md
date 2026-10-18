@@ -149,7 +149,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 
 ### RL family
 
-- `two_face_deep_sets` 使用独立的面内 EGNN → triangle dual GNN → Deep Sets。网络只读取带 ambient 面归属的二维面 triangulations；collection 独立请求 face metadata，不自动开启 `two_face_state`。首版使用原始 4D 坐标与 `max_kcup`，新 checkpoint 必须带匹配的 `model_config.json` 并 strict load。critic-only 不枚举候选；零动作仍能计算 value。记录 `policy_observation_kind`、`policy_observation_schema_version` 和模型参数量，`state_representation` 仍仅描述搜索身份。
+- `two_face_deep_sets` 使用独立的面内 EGNN → triangle readout → Deep Sets，不使用 triangle dual GNN。网络只读取带 ambient 面归属的二维面 triangulations；collection 独立请求 face metadata，不自动开启 `two_face_state`。首版使用原始 4D 坐标与 `max_kcup`，新 checkpoint 必须带匹配的 `model_config.json` 并 strict load。critic-only 不枚举候选；零动作仍能计算 value。记录 `policy_observation_kind`、`policy_observation_schema_version` 和模型参数量，`state_representation` 仍仅描述搜索身份。
 - 默认使用 EGNN + `snn_simplex` actor/critic（输入 4 维、hidden/out channels 64、3 层）。checkpoint 默认来自 `runs/cy_snn_kcup_h11_15_20260921_123000_1584461/checkpoints/`，复用 latest 解析与严格加载；一个 evaluation 只加载一次模型。模型与设备参数均记录，不影响 setup。
 - `rl_stochastic_policy` 禁止重复访问。起点立即进入本起点的 `visited_state_keys`；屏蔽所有指向已访问状态的动作后，重新归一化剩余 policy 概率并采样。成功查询并移动后加入 visited。没有邻居时为 `no_neighbors`，邻居全部已访问时为 `no_unvisited_neighbors`；后一种情况记录零查询 expansion，不抽样、不移动。
 - `rl_policy_beam_search`：每父节点取最多 `beam_width=k` 个 policy 概率最高的未发现目标，全部查询 objective；按累计 `log π` 保留下一层 top k，不作长度归一化。

@@ -1,4 +1,4 @@
-"""Shared face-local EGNN, triangle dual messages, and Deep Sets actor/critic."""
+"""Shared face-local EGNN, triangle readout, and Deep Sets actor/critic."""
 
 import torch
 from torch import nn
@@ -17,20 +17,6 @@ def _mlp(inputs, hidden, outputs, act):
     return nn.Sequential(nn.Linear(inputs, hidden), activation_resolver(act), nn.Linear(hidden, outputs))
 
 
-class TriangleDualLayer(nn.Module):
-    def __init__(self, channels, hidden, act):
-        super().__init__()
-        self.message = _mlp(2 * channels, hidden, channels, act)
-        self.update = _mlp(2 * channels, hidden, channels, act)
-        self.norm = nn.LayerNorm(channels)
-
-    def forward(self, triangles, edges):
-        source, target = edges
-        messages = self.message(torch.cat((triangles[source], triangles[target]), dim=-1))
-        aggregated = _sum(messages, target, triangles.size(0))
-        return self.norm(triangles + self.update(torch.cat((triangles, aggregated), dim=-1)))
-
-
 class TwoFaceAgent(nn.Module):
     observation_kind = "two_face"
     observation_schema_version = TWO_FACE_OBSERVATION_SCHEMA_VERSION
@@ -38,25 +24,23 @@ class TwoFaceAgent(nn.Module):
     value_feature_source = "two_face"
 
     def __init__(self, *, in_channels, out_channels=64, hidden_channels=64, num_layers=3,
-                 triangle_num_layers=2, act="silu", device="cpu"):
+                 act="silu", device="cpu"):
         super().__init__()
         if in_channels not in (3, 4):
             raise ValueError("two_face_deep_sets requires coordinate dimension 3 or 4.")
-        if min(out_channels, hidden_channels, num_layers, triangle_num_layers) <= 0:
+        if min(out_channels, hidden_channels, num_layers) <= 0:
             raise ValueError("Model channels and layer counts must be positive.")
         self.model_config = dict(
             model_type="egnn", subcomplex_actor_type=self.subcomplex_actor_type,
             observation_kind=self.observation_kind, observation_schema_version=self.observation_schema_version,
             in_channels=in_channels, hidden_channels=hidden_channels, out_channels=out_channels,
-            num_layers=num_layers, triangle_num_layers=triangle_num_layers, activation=act,
-            face_pooling="sum", global_pooling="sum", triangle_normalization="layer_norm",
+            num_layers=num_layers, activation=act,
+            face_pooling="sum", global_pooling="sum",
             vertex_preprocessing="none", vertex_augmentation=False, actor_global_context=True,
         )
         self.point_egnn = EGNN(in_node_nf=in_channels, hidden_nf=hidden_channels,
                                out_node_nf=out_channels, n_layers=num_layers, act_fn=act, device=device)
         self.triangle_mlp = _mlp(out_channels, hidden_channels, out_channels, act)
-        self.triangle_dual = nn.ModuleList(
-            TriangleDualLayer(out_channels, hidden_channels, act) for _ in range(triangle_num_layers))
         self.phi_triangle = _mlp(out_channels, hidden_channels, out_channels, act)
         self.face_mlp = _mlp(out_channels + in_channels + 1, hidden_channels, out_channels, act)
         self.phi_face = _mlp(out_channels, hidden_channels, out_channels, act)
@@ -70,8 +54,6 @@ class TwoFaceAgent(nn.Module):
             raise ValueError("TwoFaceAgent requires a TwoFaceData batch.")
         h, _ = self.point_egnn(h=batch.x, x=batch.x, edges=batch.edge_index)
         z = self.triangle_mlp(h[batch.triangle_vertices].sum(dim=1))
-        for layer in self.triangle_dual:
-            z = layer(z, batch.triangle_edge_index)
         face_counts = batch.num_faces.reshape(-1).long()
         face_graph = torch.repeat_interleave(torch.arange(batch.num_graphs, device=h.device), face_counts)
         num_faces = face_graph.numel()

@@ -2,6 +2,7 @@
 # Train on 4D h11=15 polytopes (CY threefolds).
 # max_kcup uses log(V_next) - log(V_current); metrics report raw Kcup volume.
 # Usage: bash train_cy_two_face_kcup.sh [training arguments]
+# Activate the sage conda environment before launching.
 # Example: bash train_cy_two_face_kcup.sh --num_iterations 100 --gpu_index 1
 # Optional experiment tracking: append --use_wandb.
 set -euo pipefail
@@ -12,6 +13,25 @@ cd "${REPO_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-/home/yiranwang/anaconda3/envs/sage/bin/python}"
 for arg in "$@"; do
   if [[ "${arg}" == "--help" || "${arg}" == "-h" ]]; then
+    cat <<'HELP'
+Usage: bash train_cy_two_face_kcup.sh [training arguments]
+
+Defaults: two_face_deep_sets, 4D h11=15 data, max_kcup, 64 channels,
+          3 point EGNN layers, 128 environments, 20 rollout
+          steps, 1000 iterations, learning rate 0.0001, no augmentation,
+          and zero count bonus. Wandb is opt-in with --use_wandb.
+
+Examples (after conda activate sage):
+  bash train_cy_two_face_kcup.sh --gpu_index 0 --seed 0
+  RUN_ID=two_face_seed_1 bash train_cy_two_face_kcup.sh --gpu_index 1 --seed 1
+
+Caller arguments override the defaults. RUN_ID names the run under runs/;
+RUN_DIR sets its directory directly. PYTHON_BIN selects the interpreter.
+Checkpoints, iteration_metrics.jsonl, and logs/ are saved in the run directory.
+Reusing a checkpoint directory loads model weights with a fresh optimizer.
+
+All training arguments:
+HELP
     exec "${PYTHON_BIN}" scripts/train_cy.py --help
   fi
 done
@@ -25,7 +45,7 @@ export WANDB_DIR="${RUN_DIR}/wandb"
 export PYTHONUNBUFFERED=1
 
 # Arguments supplied by the caller override the defaults below.
-"${PYTHON_BIN}" scripts/train_cy.py \
+TRAIN_COMMAND=("${PYTHON_BIN}" scripts/train_cy.py \
   --dataset_path data/cy/output4d_hugging_face/cy_4d_h11_15_favorable_1000_frst_10.samples.jsonl \
   --in_channels 4 \
   --subcomplex_actor_type two_face_deep_sets \
@@ -58,5 +78,15 @@ export PYTHONUNBUFFERED=1
   --save_interval 100 \
   --wandb_project calabi_yau_two_face_kcup \
   --name_suffix "${RUN_ID}" \
-  "$@" \
-  2>&1 | tee "${RUN_DIR}/logs/train_performance.log"
+  "$@")
+
+# Preserve the exact argument boundaries for reproducibility and keep earlier
+# logs when the caller deliberately reuses a run directory.
+{
+  printf '%q ' "${TRAIN_COMMAND[@]}"
+  printf '\n'
+} >> "${RUN_DIR}/logs/commands.log"
+{
+  printf 'Run directory: %s\n' "${RUN_DIR}"
+  "${TRAIN_COMMAND[@]}"
+} 2>&1 | tee -a "${RUN_DIR}/logs/train_performance.log"

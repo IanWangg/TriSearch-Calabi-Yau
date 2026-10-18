@@ -61,6 +61,38 @@ but can change trajectories relative to earlier native-order seeded runs.
 See [managed rollout runtime](docs/cy_managed_runtime.md) for controls, process
 cleanup guarantees, memory accounting, and reproducible benchmarks.
 
+### Two_face model training
+
+Use [train_cy_two_face_kcup.sh](train_cy_two_face_kcup.sh) to train
+`two_face_deep_sets` on the local 4D h11=15 dataset:
+
+```bash
+conda activate sage
+bash train_cy_two_face_kcup.sh --gpu_index 0 --seed 0
+```
+
+The launcher uses 64 channels and 3 point EGNN layers, followed by triangle
+readout and Deep Sets pooling. Training uses
+128 environments, 20 rollout steps, 1000 PPO iterations, and learning rate
+`0.0001`. It uses `two_neighbors` and `max_kcup`, with raw coordinates,
+augmentation disabled and count bonus zero. The default input is
+`data/cy/output4d_hugging_face/cy_4d_h11_15_favorable_1000_frst_10.samples.jsonl`;
+pass `--dataset_path` for another 4D dataset and adjust `--num_eval_polytopes`
+for small inputs. Training defaults to a 128 GiB job budget and 32 GiB cache
+allowance; override `--memory_budget_gb` and `--runtime_cache_gb` as needed.
+
+Every launch creates a named directory under `runs/`, containing `checkpoints/`,
+`iteration_metrics.jsonl`, `logs/commands.log`, and `logs/train_performance.log`.
+The command log records the actual arguments; performance logs append when a
+run directory is reused. Set `RUN_ID` or `RUN_DIR` to name the output explicitly.
+An existing checkpoint directory reloads weights with a fresh optimizer and
+iteration counter; `iteration_metrics.jsonl` is rewritten for each launch.
+Append `--use_wandb` to enable Wandb or use `--help` for all
+options. Paired SNN comparisons and stress commands are documented in the
+[two_face study](eval/sweep/two_face_model/README.md).
+
+### Training smoke
+
 One-iteration training smoke:
 
 ```bash

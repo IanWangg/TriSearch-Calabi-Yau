@@ -79,7 +79,7 @@ therefore does not validate the save/load cycle. Automated coverage is in
 ## Stress checks
 
 `scripts/stress_test.py` runs deterministic CPU checks at the production model
-size (64 channels, 3 point layers, 2 triangle layers). Run it from the repository
+size (64 channels, 3 point EGNN layers). Run it from the repository
 root in the `sage` environment. Each invocation requires a new output directory
 and writes incremental `report.json` evidence, including failures, timing and
 peak process RSS. Synthetic face grids exercise tensor scaling; they are not

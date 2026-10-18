@@ -17,6 +17,20 @@ def two_face_policy(dimension=3):
         in_channels=dimension, hidden_channels=8, out_channels=8, num_layers=2).eval()
 
 
+@pytest.mark.parametrize("dimension", [3, 4])
+def test_encoding_does_not_require_triangle_adjacency(dimension):
+    state = square_state(dimension=dimension)
+    data = create_two_face_data_from_state(state, square_actions(state))
+    model = two_face_policy(dimension)
+    expected_value, expected_logits = model.get_value_and_logits(Batch.from_data_list([data]))
+    del data.triangle_edge_index
+    batch = Batch.from_data_list([data])
+    value, logits = model.get_value_and_logits(batch)
+    torch.testing.assert_close(value, expected_value)
+    torch.testing.assert_close(logits, expected_logits)
+    torch.testing.assert_close(model.get_value(batch), expected_value)
+
+
 def test_batch_independence_action_subsets_and_empty_forward():
     state, small = square_state(), square_state(one_face=True)
     data = create_two_face_data_from_state(state, square_actions(state))
@@ -79,7 +93,7 @@ def test_backwards_reaches_shared_encoder_and_both_heads():
     batch = Batch.from_data_list([create_two_face_data_from_state(state, square_actions(state))])
     value, logits = model.get_value_and_logits(batch)
     (value.square().sum() + logits.square().sum()).backward()
-    for module in (model.point_egnn, model.triangle_mlp, model.triangle_dual, model.face_mlp,
+    for module in (model.point_egnn, model.triangle_mlp, model.face_mlp,
                    model.rho, model.actor_mlp, model.value_mlp):
         grads = [parameter.grad for parameter in module.parameters() if parameter.grad is not None]
         assert grads and all(torch.isfinite(grad).all() for grad in grads)
