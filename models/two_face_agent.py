@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 
 from core.cy_two_face_data import TWO_FACE_OBSERVATION_SCHEMA_VERSION
+from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME, STEP_LOG_VOLUME, CONTEXT_FIELDS
 from .act_resolver import activation_resolver
 from .egnn import EGNN
 
@@ -24,8 +25,16 @@ class TwoFaceAgent(nn.Module):
     value_feature_source = "two_face"
 
     def __init__(self, *, in_channels, out_channels=64, hidden_channels=64, num_layers=3,
-                 act="silu", device="cpu"):
+                 act="silu", device="cpu", training_reward_mode=STEP_LOG_VOLUME, episode_horizon=None):
         super().__init__()
+        if training_reward_mode not in (STEP_LOG_VOLUME, BEST_SO_FAR_LOG_VOLUME):
+            raise ValueError("Unsupported training_reward_mode.")
+        self.training_reward_mode = training_reward_mode
+        self.requires_episode_context = training_reward_mode == BEST_SO_FAR_LOG_VOLUME
+        if self.requires_episode_context:
+            if type(episode_horizon) is not int or episode_horizon <= 0:
+                raise ValueError("Context policy requires a positive episode_horizon.")
+            self.observation_schema_version = 2
         if in_channels not in (3, 4):
             raise ValueError("two_face_deep_sets requires coordinate dimension 3 or 4.")
         if min(out_channels, hidden_channels, num_layers) <= 0:
@@ -38,6 +47,12 @@ class TwoFaceAgent(nn.Module):
             face_pooling="sum", global_pooling="sum",
             vertex_preprocessing="none", vertex_augmentation=False, actor_global_context=True,
         )
+        if self.requires_episode_context:
+            self.model_config.update(
+                training_reward_mode=training_reward_mode, episode_horizon=episode_horizon,
+                episode_context_fields=list(CONTEXT_FIELDS),
+                critic_target="expected_remaining_best_log_volume_gain", gamma=1.0,
+            )
         self.point_egnn = EGNN(in_node_nf=in_channels, hidden_nf=hidden_channels,
                                out_node_nf=out_channels, n_layers=num_layers, act_fn=act, device=device)
         self.triangle_mlp = _mlp(out_channels, hidden_channels, out_channels, act)
@@ -47,6 +62,8 @@ class TwoFaceAgent(nn.Module):
         self.rho = _mlp(out_channels + 1, hidden_channels, out_channels, act)
         self.actor_mlp = _mlp(4 * out_channels, hidden_channels, 1, act)
         self.value_mlp = _mlp(out_channels, hidden_channels, 1, act)
+        if self.requires_episode_context:
+            self.context_mlp = _mlp(out_channels + len(CONTEXT_FIELDS), hidden_channels, out_channels, act)
         self.to(device)
 
     def _encode(self, batch):
@@ -63,6 +80,13 @@ class TwoFaceAgent(nn.Module):
         faces = self.face_mlp(torch.cat((face_sum, centroids, node_counts), dim=-1))
         global_sum = _sum(self.phi_face(faces), face_graph, batch.num_graphs)
         global_features = self.rho(torch.cat((global_sum, face_counts.to(h.dtype).unsqueeze(-1)), dim=-1))
+        if self.requires_episode_context:
+            context = getattr(batch, "episode_context", None)
+            if context is None or context.shape != (batch.num_graphs, len(CONTEXT_FIELDS)):
+                raise ValueError("Context policy requires one episode_context row per state.")
+            if not torch.isfinite(context).all():
+                raise ValueError("episode_context must be finite.")
+            global_features = self.context_mlp(torch.cat((global_features, context.to(global_features)), dim=-1))
         return h, z, faces, global_features, face_graph
 
     def get_value(self, batch):

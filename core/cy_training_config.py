@@ -6,6 +6,7 @@ from typing import Any, List, Sequence
 
 import torch
 
+from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME, STEP_LOG_VOLUME, TRAINING_REWARD_MODES
 from mdp.cy_state_record import NEIGHBOR_MODES
 from models.subcomplex_policy_config import (
     DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
@@ -25,6 +26,7 @@ class CYTrainingConfig:
     neighbor_mode: str
     reward_function: str | None
     cy_volume_reward_transform: str
+    training_reward_mode: str
     seed: int
     num_eval_polytopes: int
     num_iterations: int
@@ -173,8 +175,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=128,
         help="Number of parallel rollout environments.",
     )
-    parser.add_argument("--rollout_length", type=int, default=20)
-    parser.add_argument("--gamma", type=float, default=0.95)
+    parser.add_argument("--training_reward_mode", choices=TRAINING_REWARD_MODES, default=STEP_LOG_VOLUME,
+                        help="Legacy per-step reward, or finite-episode best log Kcup improvement (two_face only).")
+    parser.add_argument("--rollout_length", type=int, default=None)
+    parser.add_argument("--gamma", type=float, default=None)
     parser.add_argument("--gae_lambda", type=float, default=0.95)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--clip_coef", type=float, default=0.1)
@@ -207,7 +211,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Use greedy action selection during evaluation.",
     )
     parser.add_argument("--num_eval_states", type=int, default=128)
-    parser.add_argument("--eval_steps", type=int, default=20)
+    parser.add_argument("--eval_steps", type=int, default=None)
     parser.add_argument("--eval_interval", type=int, default=100)
 
     parser.add_argument(
@@ -422,7 +426,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=16,
         help="Maximum number of dataset rows kept in dry-run mode.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    finite = args.training_reward_mode == BEST_SO_FAR_LOG_VOLUME
+    if args.gamma is None:
+        args.gamma = 1.0 if finite else 0.95
+    if args.rollout_length is None:
+        args.rollout_length = 128 if finite else 20
+    if args.eval_steps is None:
+        args.eval_steps = 128 if finite else 20
+    if finite:
+        validate_two_face_training_args(args)
+    return args
 
 
 def validate_cy_volume_reward_transform_args(args: argparse.Namespace) -> None:
@@ -475,6 +489,13 @@ def validate_count_bonus_args(args: argparse.Namespace) -> None:
 
 
 def validate_two_face_training_args(args: argparse.Namespace) -> None:
+    if getattr(args, "training_reward_mode", STEP_LOG_VOLUME) == BEST_SO_FAR_LOG_VOLUME:
+        if args.subcomplex_actor_type != "two_face_deep_sets":
+            raise ValueError("best_so_far_log_volume requires two_face_deep_sets.")
+        if args.gamma != 1.0:
+            raise ValueError("best_so_far_log_volume requires gamma=1.")
+        if args.rollout_length <= 0 or args.eval_steps <= 0:
+            raise ValueError("best_so_far_log_volume requires positive episode lengths.")
     if observation_kind_for_subcomplex_actor(args.subcomplex_actor_type) != "two_face":
         return
     if args.neighbor_mode != "two_neighbors" or args.include_points_interior_to_facets:
@@ -530,6 +551,8 @@ def format_float_suffix(value: float) -> str:
 
 def build_training_variant_suffix(args: argparse.Namespace) -> str:
     suffix_parts: List[str] = []
+    if getattr(args, "training_reward_mode", STEP_LOG_VOLUME) == BEST_SO_FAR_LOG_VOLUME:
+        suffix_parts.append(BEST_SO_FAR_LOG_VOLUME)
     subcomplex_actor_type = normalize_subcomplex_actor_type(
         getattr(args, "subcomplex_actor_type", DEFAULT_SUBCOMPLEX_ACTOR_TYPE)
     )

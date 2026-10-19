@@ -141,6 +141,10 @@ class PolicyRolloutSummary:
     return_min: float = 0.0
     return_max: float = 0.0
     training_return_mean: float = 0.0
+    training_reward_mode: str = "step_log_volume"
+    episode_lengths: List[int] | None = None
+    episode_terminal_reasons: List[str] | None = None
+    objective_query_sec: float = 0.0
 
 
 @dataclass(frozen=True)

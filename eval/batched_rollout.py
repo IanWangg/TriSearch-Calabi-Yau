@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 
+from core.cy_episode_context import EpisodeContext
 from eval.algorithm.base import SearchNode
 from eval.algorithm.rl import RLAlgorithm
 from eval.policy import PolicyScorer
@@ -62,8 +63,14 @@ def _prepare_layer(trajectories, engine, policy, search_observer=None):
                   for (trajectory, parent), action_list in zip(entries, actions)]
     scored = [item for item in expansions if item.trajectory.algorithm.requires_policy and item.actions]
     if scored:
+        score_options = {}
+        if getattr(policy, "requires_episode_context", False):
+            score_options["episode_contexts"] = [EpisodeContext(
+                item.parent.node.objective, item.trajectory.session.best_value,
+                item.trajectory.session.remaining_budget,
+            ) for item in scored]
         probabilities = policy.score_actions([item.parent.node.state for item in scored],
-                                             [item.actions for item in scored])
+                                             [item.actions for item in scored], **score_options)
         if len(probabilities) != len(scored):
             raise ValueError("Policy returned the wrong number of action-score rows.")
         for item, row in zip(scored, probabilities):
@@ -139,6 +146,9 @@ def run_batched_rollouts(
             raise ValueError(f"{algorithm.name} supports only {algorithm.supported_objectives}.")
     if policy is None:
         raise ValueError("RL evaluation requires a shared policy scorer.")
+    if getattr(policy, "requires_episode_context", False):
+        from eval.policy import EvaluationPolicy
+        EvaluationPolicy.validate_context_algorithms([algorithm.name for algorithm in algorithms], objective_name)
     if not initial_states:
         return []
     reward = reward_function if reward_function is not None else get_reward(objective_name)

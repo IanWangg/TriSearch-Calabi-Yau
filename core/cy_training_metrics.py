@@ -97,6 +97,11 @@ def _rollout_iteration_metrics_payload(
         "return": _return_metrics_payload(summary),
         "elapsed_sec": float(elapsed_sec),
     }
+    payload["training_reward_mode"] = summary.training_reward_mode
+    if summary.episode_lengths is not None:
+        payload["objective_query_sec"] = float(summary.objective_query_sec)
+        payload["episode_lengths"] = summary.episode_lengths
+        payload["episode_terminal_reasons"] = summary.episode_terminal_reasons
     if summary.objective_name in {"max_cy_volume", "max_kcup"}:
         payload["raw_volume"] = build_raw_volume_metrics(summary)
     return payload

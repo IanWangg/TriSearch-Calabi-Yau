@@ -171,7 +171,8 @@ def test_v1_training_constraints_and_builder_validation():
     assert torch.isfinite(value).all()
 
 
-def test_real_training_checkpoint_and_search_smoke(tmp_path):
+@pytest.mark.parametrize("reward_mode", ["step_log_volume", "best_so_far_log_volume"])
+def test_real_training_checkpoint_and_search_smoke(tmp_path, reward_mode):
     from eval.pipeline import run_evaluation
     from eval.setup import EvaluationSetup
     from eval.results.plotting import read_comparison
@@ -188,6 +189,8 @@ def test_real_training_checkpoint_and_search_smoke(tmp_path):
         "--hidden_channels", "8", "--out_channels", "8", "--num_layers", "2",
         "--transition_num_workers", "1", "--memory_budget_gb", "8", "--runtime_cache_gb", ".05",
         "--checkpoint_path", str(checkpoint_dir), "--iteration_metrics_path", str(tmp_path / "metrics.jsonl")]
+    command += ["--training_reward_mode", reward_mode]
+    contextual = reward_mode == "best_so_far_log_volume"
     logs = tmp_path / "logs"
     logs.mkdir()
     with (logs / "training.log").open("w") as stream:
@@ -195,10 +198,21 @@ def test_real_training_checkpoint_and_search_smoke(tmp_path):
                                 stdout=stream, stderr=subprocess.STDOUT, timeout=180)
     assert result.returncode == 0, (logs / "training.log").read_text()
     assert (checkpoint_dir / "1.pth").is_file() and (checkpoint_dir / "model_config.json").is_file()
-    assert json.loads((tmp_path / "metrics.jsonl").read_text())["iteration"] == 1
+    metrics = json.loads((tmp_path / "metrics.jsonl").read_text())
+    assert metrics["iteration"] == 1
+    assert metrics["train"]["training_reward_mode"] == reward_mode
+    if contextual:
+        import math
+        for phase, horizon in (("train", 2), ("eval", 1)):
+            assert metrics[phase]["objective_query_sec"] > 0
+            slots = metrics[phase]["raw_volume"]["slots"]
+            expected = sum(math.log(slot["best_volume"] / slot["initial_volume"]) for slot in slots) / len(slots)
+            assert metrics[phase]["return"]["training_mean"] == pytest.approx(expected)
+            assert all(length <= horizon for length in metrics[phase]["episode_lengths"])
+        assert all(math.isfinite(metrics["ppo"][key]) for key in ("total_loss", "policy_loss", "value_loss"))
     row = json.loads(fixture.read_text().splitlines()[0])
     row["frst_list"] = row["frst_list"][:1]
-    spec = EvaluationSpec(1, 12, 1, 2, algorithms=("rl_value_best_first",),
+    spec = EvaluationSpec(1, 12, 1, 2, algorithms=("rl_stochastic_policy" if contextual else "rl_value_best_first",),
         policy_checkpoint=str(checkpoint_dir), subcomplex_actor_type="two_face_deep_sets", force_cpu=True,
         hidden_channels=8, out_channels=8, num_layers=2, two_face_state=True, policy_proposal_count=2,
         runtime_cache_gb=.05, memory_budget_gb=8)
@@ -211,7 +225,17 @@ def test_real_training_checkpoint_and_search_smoke(tmp_path):
         read_comparison(output)
         config = json.loads((output / "config.json").read_text())
         assert config["policy"]["policy_observation_kind"] == "two_face"
-        assert config["policy"]["policy_observation_schema_version"] == 1
+        assert config["policy"]["policy_observation_schema_version"] == (2 if contextual else 1)
+    if contextual:
+        saved = json.loads((checkpoint_dir / "model_config.json").read_text())
+        assert saved["training_reward_mode"] == reward_mode and saved["episode_horizon"] == 2
+        for algorithm in ("rl_value_best_first", "rl_value_beam_search", "rl_policy_beam_search"):
+            with pytest.raises(ValueError, match="BeFS/Beam"):
+                run_evaluation(replace(spec, algorithms=(algorithm,)), setup, output_dir=tmp_path / algorithm)
+            assert not (tmp_path / algorithm).exists()
+        with pytest.raises(ValueError, match="model_config mismatch"):
+            load_policy_checkpoint(two_face_policy(4), str(checkpoint_dir / "1.pth"), map_location="cpu")
+        return
     # Metadata is requested even with full-representative search identity.
     critic_spec = replace(spec, two_face_state=False, policy_proposal_count=-1)
     critic_policy = EvaluationPolicy.from_spec(critic_spec)

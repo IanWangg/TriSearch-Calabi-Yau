@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Sequence
 import torch
 import numpy as np
 
+from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME
+from core.cy_policy_inference import PolicyValueResult
 from core.cy_checkpointing import (
     find_latest_policy_checkpoint,
     save_iteration_checkpoints,
@@ -276,6 +278,8 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
         mlp_hidden_channel_list=[64],
         act="silu",
         subcomplex_actor_type=subcomplex_actor_type,
+        training_reward_mode=args.training_reward_mode,
+        episode_horizon=args.rollout_length,
         device=str(device),
     ).to(device)
     print(f"Using policy in_channels={resolved_in_channels}")
@@ -403,8 +407,12 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                 vertex_aug_shift_std=float(args.vertex_aug_shift_std),
                 vertex_aug_reflect_prob=float(args.vertex_aug_reflect_prob),
                 objective_function=objective_function,
+                batch_objective_function=(
+                    lambda states: train_engine.objective_values(states, args.reward_function)
+                ) if args.training_reward_mode == BEST_SO_FAR_LOG_VOLUME else None,
                 objective_name=args.reward_function,
                 objective_goal=objective_goal,
+                training_reward_mode=args.training_reward_mode,
             )
             rollout_sec = time.perf_counter() - rollout_start
             print(
@@ -418,23 +426,29 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
 
             bootstrap_start = time.perf_counter()
             bootstrap_expand_summary = None
-            if args.observation_kind == "two_face":
-                bootstrap_action_lists = [()] * len(rollout_summary.final_states)
-            else:
-                bootstrap_action_lists, bootstrap_expand_summary = train_engine.candidate_actions_for_states(
-                    rollout_summary.final_states,
-                    use_multiprocessing=bool(args.use_multiprocessing),
-                    transition_pool=transition_pool,
-                    transition_mp_chunksize=int(args.transition_mp_chunksize),
-                    transition_mp_min_batch=int(args.transition_mp_min_batch),
+            if args.training_reward_mode == BEST_SO_FAR_LOG_VOLUME:
+                bootstrap_value_result = PolicyValueResult(
+                    value_tensor=torch.zeros(len(rollout_summary.final_states), device=device),
+                    data_build_sec=0.0, batch_transfer_sec=0.0, inference_sec=0.0,
                 )
-            bootstrap_value_result = evaluate_policy_values(
-                rollout_summary.final_states,
-                bootstrap_action_lists,
-                policy,
-                device=device,
-                trajectory_transforms=rollout_summary.trajectory_transforms,
-            )
+            else:
+                if args.observation_kind == "two_face":
+                    bootstrap_action_lists = [()] * len(rollout_summary.final_states)
+                else:
+                    bootstrap_action_lists, bootstrap_expand_summary = train_engine.candidate_actions_for_states(
+                        rollout_summary.final_states,
+                        use_multiprocessing=bool(args.use_multiprocessing),
+                        transition_pool=transition_pool,
+                        transition_mp_chunksize=int(args.transition_mp_chunksize),
+                        transition_mp_min_batch=int(args.transition_mp_min_batch),
+                    )
+                bootstrap_value_result = evaluate_policy_values(
+                    rollout_summary.final_states,
+                    bootstrap_action_lists,
+                    policy,
+                    device=device,
+                    trajectory_transforms=rollout_summary.trajectory_transforms,
+                )
             bootstrap_sec = time.perf_counter() - bootstrap_start
 
             if rollout_summary.rollout_buffer is None:
@@ -493,8 +507,12 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                     report_every=0,
                     label="eval",
                     objective_function=objective_function,
+                    batch_objective_function=(
+                        lambda states: eval_engine.objective_values(states, args.reward_function)
+                    ) if args.training_reward_mode == BEST_SO_FAR_LOG_VOLUME else None,
                     objective_name=args.reward_function,
                     objective_goal=objective_goal,
+                    training_reward_mode=args.training_reward_mode,
                 )
                 eval_sec = time.perf_counter() - eval_start
                 eval_engine.release_active_states()

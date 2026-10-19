@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Callable, List, Sequence
+from typing import Any, Callable, Iterable, List, Sequence
+
+import time
 
 import numpy as np
 import torch
 
-from core.cy_policy_inference import rollout_step_with_policy
+from core.cy_policy_inference import rollout_step_with_policy, query_objective_values
+from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME, STEP_LOG_VOLUME, EpisodeContext, best_so_far_reward
 from core.cy_ppo import PPORolloutBuffer
 from core.cy_runtime_utils import increment_visitation
 from core.training_types import FirstEpisodeTracker, PolicyRolloutSummary
@@ -19,7 +22,8 @@ def format_rollout_summary(
     num_envs: int,
     rollout_length: int,
 ) -> str:
-    env_steps = max(1, int(num_envs) * int(rollout_length))
+    env_steps = max(1, sum(summary.episode_lengths) if summary.episode_lengths is not None
+                    else int(num_envs) * int(rollout_length))
     mean_candidates = float(summary.total_candidates) / env_steps
     valid_action_fraction = float(summary.total_valid_actions) / env_steps
     parts = [
@@ -30,7 +34,7 @@ def format_rollout_summary(
         f"discounted_reward={summary.discounted_reward:.4f}",
         f"success_rate={summary.success_rate:.4f}",
     ]
-    if abs(float(summary.intrinsic_bonus_mean)) > 0.0:
+    if abs(float(summary.intrinsic_bonus_mean)) > 0.0 or summary.training_reward_mode == BEST_SO_FAR_LOG_VOLUME:
         parts.extend(
             [
                 f"training_return={summary.training_return_mean:.4f}",
@@ -38,6 +42,10 @@ def format_rollout_summary(
                 f"intrinsic_bonus_mean={summary.intrinsic_bonus_mean:.4f}",
             ]
         )
+    if summary.training_reward_mode == BEST_SO_FAR_LOG_VOLUME:
+        parts.append(f"training_reward_mode={summary.training_reward_mode}")
+        parts.append(f"episode_length_mean={np.mean(summary.episode_lengths):.2f}")
+        parts.append(f"objective_query_sec={summary.objective_query_sec:.2f}")
     parts.extend(
         [
             f"finished_fraction={summary.finished_fraction:.4f}",
@@ -202,17 +210,34 @@ def collect_policy_rollout(
     vertex_aug_shift_std: float = 0.05,
     vertex_aug_reflect_prob: float = 0.1,
     objective_function: Callable[[Any], float] | None = None,
+    batch_objective_function: Callable[[Sequence[Any]], Iterable[float]] | None = None,
     objective_name: str | None = None,
     objective_goal: str | None = None,
+    training_reward_mode: str = STEP_LOG_VOLUME,
 ) -> PolicyRolloutSummary:
+    finite_episode = training_reward_mode == BEST_SO_FAR_LOG_VOLUME
+    if training_reward_mode not in (STEP_LOG_VOLUME, BEST_SO_FAR_LOG_VOLUME):
+        raise ValueError("Unsupported training_reward_mode.")
+    if finite_episode:
+        if gamma != 1.0 or rollout_length <= 0 or count_bonus_coef != 0 or vertex_aug_enable:
+            raise ValueError("best_so_far_log_volume requires gamma=1, positive horizon, no bonus or augmentation.")
+        if objective_function is None or objective_name != "max_kcup" or objective_goal != "max":
+            raise ValueError("best_so_far_log_volume requires the max_kcup objective.")
+    if bool(getattr(policy, "requires_episode_context", False)) != finite_episode:
+        raise ValueError("Policy context and training_reward_mode do not match.")
     states = engine.sample_initial_states(num_envs, rng=rng, initial_state_pool=initial_state_pool)
+    active = [True] * len(states)
+    episode_lengths = [0] * len(states)
+    episode_terminal_reasons = ["continue"] * len(states)
     if objective_function is not None and objective_goal not in {"min", "max"}:
         raise ValueError("objective_goal must be 'min' or 'max' with objective_function.")
+    objective_start = time.perf_counter()
     objective_initial_values = (
-        [float(objective_function(state)) for state in states]
+        query_objective_values(states, objective_function, batch_objective_function)
         if objective_function is not None
         else None
     )
+    total_objective_query_sec = time.perf_counter() - objective_start
     objective_final_values = (
         list(objective_initial_values) if objective_initial_values is not None else None
     )
@@ -256,11 +281,22 @@ def collect_policy_rollout(
     training_rollout_returns = np.zeros(len(states), dtype=np.float64)
 
     for step_index in range(int(rollout_length)):
+        if finite_episode and not any(active):
+            break
+        step_options = {}
+        if finite_episode:
+            step_options = dict(
+                episode_contexts=[EpisodeContext(current, best, int(rollout_length) - step_index if enabled else 0)
+                                  for current, best, enabled in zip(objective_final_values, objective_best_values, active)],
+                active_mask=active, reset_on_done=False, objective_function=objective_function,
+                batch_objective_function=batch_objective_function,
+                current_objective_values=objective_final_values,
+            )
         pool = transition_pool or getattr(engine, "transition_pool", None)
         if pool is not None and hasattr(pool, "check_memory"):
             pool.check_memory()
         increment_visitation(
-            states,
+            [state for state, enabled in zip(states, active) if enabled] if finite_episode else states,
             visit_counts_by_key=visit_counts_by_key if use_count_bonus else None,
         )
         step_result = rollout_step_with_policy(
@@ -276,6 +312,7 @@ def collect_policy_rollout(
             transition_mp_chunksize=transition_mp_chunksize,
             transition_mp_min_batch=transition_mp_min_batch,
             trajectory_transforms=trajectory_transforms,
+            **step_options,
         )
         intrinsic_bonus = compute_cy_state_count_bonus(
             input_states=getattr(step_result, "input_states", states),
@@ -290,12 +327,27 @@ def collect_policy_rollout(
             float(extrinsic_reward) + float(bonus)
             for extrinsic_reward, bonus in zip(step_result.rewards, intrinsic_bonus)
         ]
+        if finite_episode:
+            training_rewards = [0.0] * len(states)
+            for idx, enabled in enumerate(active):
+                if not enabled:
+                    continue
+                objective_value = step_result.objective_values[idx]
+                best, training_rewards[idx] = best_so_far_reward(objective_best_values[idx], objective_value)
+                objective_final_values[idx], objective_best_values[idx] = objective_value, best
+                episode_lengths[idx] += 1
+                if step_index + 1 == int(rollout_length) and not step_result.dones[idx]:
+                    step_result.dones[idx] = True
+                    step_result.terminal_reasons[idx] = "budget_exhausted"
+                if step_result.dones[idx]:
+                    active[idx] = False
+                    episode_terminal_reasons[idx] = step_result.terminal_reasons[idx]
         step_result.intrinsic_bonus = intrinsic_bonus
         step_result.training_rewards = training_rewards
         rollout_returns += np.asarray(step_result.rewards, dtype=np.float64)
         training_rollout_returns += np.asarray(training_rewards, dtype=np.float64)
 
-        if objective_function is not None:
+        if objective_function is not None and not finite_episode:
             for idx, transitioned_state in enumerate(step_result.transitioned_states):
                 if not objective_first_episode_active[idx]:
                     continue
@@ -346,12 +398,17 @@ def collect_policy_rollout(
         total_policy_value_inference_sec += float(step_result.policy_value_inference_sec)
         total_policy_action_inference_sec += float(step_result.policy_action_inference_sec)
         total_transition_apply_sec += float(step_result.transition_apply_sec)
+        total_objective_query_sec += float(getattr(step_result, "objective_query_sec", 0.0))
 
     return_stats = rollout_return_statistics(rollout_returns)
     training_return_stats = rollout_return_statistics(training_rollout_returns)
 
     return PolicyRolloutSummary(
         final_states=states,
+        training_reward_mode=training_reward_mode,
+        objective_query_sec=total_objective_query_sec,
+        episode_lengths=episode_lengths if finite_episode else None,
+        episode_terminal_reasons=episode_terminal_reasons if finite_episode else None,
         rollout_buffer=rollout_buffer,
         success_rate=tracker.success_rate(),
         discounted_reward=tracker.mean_discounted_reward(),

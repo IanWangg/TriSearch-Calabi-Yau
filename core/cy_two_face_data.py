@@ -53,6 +53,11 @@ class TwoFaceData(Data):
         return super().__cat_dim__(key, value, *args, **kwargs)
 
 
+class TwoFaceContextData(TwoFaceData):
+    """Topology plus a trajectory-local observation (schema 2)."""
+    observation_schema_version = 2
+
+
 @dataclass(frozen=True)
 class _FaceTopology:
     fields: dict

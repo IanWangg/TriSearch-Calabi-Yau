@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Protocol, Sequence
 
@@ -10,17 +11,18 @@ import numpy as np
 import torch
 
 from core.cy_checkpointing import find_latest_policy_checkpoint
+from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME
 from core.cy_policy_inference import evaluate_policy_scores
 from core.cy_runtime_utils import load_policy_checkpoint, resolve_training_device
 from models.subcomplex_policy_factory import build_subcomplex_agent
 
 
 class PolicyScorer(Protocol):
-    def score_actions(self, states, action_lists) -> Sequence[np.ndarray]:
+    def score_actions(self, states, action_lists, *, episode_contexts=None) -> Sequence[np.ndarray]:
         """Full-action log probabilities, in input state/action order."""
         ...
 
-    def score_values(self, states) -> Sequence[float]:
+    def score_values(self, states, *, episode_contexts=None) -> Sequence[float]:
         """State critic values; no outgoing actions or geometry queries."""
         ...
 
@@ -31,6 +33,9 @@ class EvaluationPolicy:
         self.model = model.to(self.device).eval()
         self.max_graph_size = max_graph_size
         self.metadata = dict(metadata or {})
+        self.requires_episode_context = bool(getattr(model, "requires_episode_context", False))
+        if self.requires_episode_context:
+            self.metadata.update(model.model_config)
         self.observation_kind = getattr(model, "observation_kind", "full_triangulation")
         self.metadata.update(
             policy_observation_kind=self.observation_kind,
@@ -51,6 +56,11 @@ class EvaluationPolicy:
                       hidden_channels=spec.hidden_channels, num_layers=spec.num_layers,
                       subcomplex_actor_type=spec.subcomplex_actor_type, share_encoder=True,
                       mlp_hidden_channel_list=[64], act="silu")
+        config_path = path.parent / "model_config.json"
+        saved = json.loads(config_path.read_text()) if config_path.is_file() else {}
+        if saved.get("training_reward_mode") == BEST_SO_FAR_LOG_VOLUME:
+            cls.validate_context_algorithms(spec.algorithms, spec.reward_function)
+            config.update(training_reward_mode=BEST_SO_FAR_LOG_VOLUME, episode_horizon=saved["episode_horizon"])
         model = build_subcomplex_agent(**config, device=str(device))
         load_policy_checkpoint(model, str(path), map_location=device)
         with path.open("rb") as stream:
@@ -63,6 +73,13 @@ class EvaluationPolicy:
                     "value_discount": spec.value_discount}
         return cls(model, device=device, max_graph_size=spec.policy_max_graph_size, metadata=metadata)
 
+    @staticmethod
+    def validate_context_algorithms(algorithms, objective_name="max_kcup"):
+        unsupported = [name for name in algorithms if name.startswith("rl_") and name != "rl_stochastic_policy"]
+        if unsupported or objective_name != "max_kcup":
+            raise ValueError("best_so_far_log_volume checkpoint supports only rl_stochastic_policy with max_kcup; "
+                             "BeFS/Beam require a different critic scoring contract.")
+
     def reset_stats(self):
         self._stats = dict(action_batches=0, value_batches=0, action_states=0, value_states=0,
                            physical_batches=0, max_logical_batch_states=0,
@@ -74,9 +91,10 @@ class EvaluationPolicy:
         return {**self._stats, "cuda_peak_allocated_bytes": (
             torch.cuda.max_memory_allocated(self.device) if self.device.type == "cuda" else 0)}
 
-    def _score(self, states, action_lists, *, value_only):
+    def _score(self, states, action_lists, *, value_only, episode_contexts=None):
         result = evaluate_policy_scores(states, action_lists, self.model, device=self.device,
-                                        value_only=value_only, max_graph_size=self.max_graph_size)
+                                        value_only=value_only, max_graph_size=self.max_graph_size,
+                                        episode_contexts=episode_contexts)
         kind = "value" if value_only else "action"
         self._stats[f"{kind}_batches"] += int(bool(states))
         self._stats[f"{kind}_states"] += len(states)
@@ -86,12 +104,12 @@ class EvaluationPolicy:
             self._stats[name] += getattr(result, name)
         return result
 
-    def score_actions(self, states, action_lists):
+    def score_actions(self, states, action_lists, *, episode_contexts=None):
         if len(states) != len(action_lists):
             raise ValueError("states and action_lists must have the same length.")
         if not states:
             return []
-        result = self._score(states, action_lists, value_only=False)
+        result = self._score(states, action_lists, value_only=False, episode_contexts=episode_contexts)
         # One device-to-host transfer. Per-start sampling uses independent NumPy
         # RNGs, so pruning another trajectory cannot perturb this one's draws.
         logits = result.logits_tensor.detach().cpu().double().numpy()
@@ -106,10 +124,10 @@ class EvaluationPolicy:
             rows.append(row)
         return rows
 
-    def score_values(self, states):
+    def score_values(self, states, *, episode_contexts=None):
         if not states:
             return np.empty(0)
-        result = self._score(states, [()] * len(states), value_only=True)
+        result = self._score(states, [()] * len(states), value_only=True, episode_contexts=episode_contexts)
         values = result.value_tensor.detach().cpu().double().numpy()
         if not np.isfinite(values).all():
             raise ValueError("Nonfinite critic values in evaluation batch.")

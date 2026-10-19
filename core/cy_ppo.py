@@ -36,6 +36,7 @@ class PreparedPPORolloutBatch:
     value_targets: torch.Tensor
     data_buffer_list: List[Data] | None = None
     observation_kind: str = "full_triangulation"
+    sample_valid_mask_flat: torch.Tensor | None = None
 
 
 @dataclass
@@ -51,6 +52,7 @@ class PPORolloutBuffer:
     reward_buffer: List[torch.Tensor] = field(default_factory=list)
     done_buffer: List[torch.Tensor] = field(default_factory=list)
     valid_mask_buffer: List[torch.Tensor] = field(default_factory=list)
+    sample_valid_mask_buffer: List[torch.Tensor] = field(default_factory=list)
     observation_kind: str | None = None
 
     def append(self, step_result: PolicyRolloutStepResult) -> None:
@@ -85,6 +87,11 @@ class PPORolloutBuffer:
         self.reward_buffer.append(torch.tensor(reward_values, dtype=torch.float))
         self.done_buffer.append(torch.tensor(step_result.dones, dtype=torch.float))
         self.valid_mask_buffer.append(step_result.valid_action_mask.detach().cpu())
+        sample_mask = getattr(step_result, "sample_valid_mask", None)
+        self.sample_valid_mask_buffer.append(
+            torch.ones_like(step_result.valid_action_mask, device="cpu") if sample_mask is None
+            else sample_mask.detach().cpu()
+        )
 
     def clear(self) -> None:
         """Release observations immediately after the associated PPO update."""
@@ -140,6 +147,7 @@ class PPORolloutBuffer:
 
         return PreparedPPORolloutBatch(
             observation_kind=self.observation_kind or "full_triangulation",
+            sample_valid_mask_flat=torch.stack(self.sample_valid_mask_buffer).bool().to(device).reshape(-1),
             state_buffer_list=flatten_buffer(self.state_buffer, rollout_length, num_states),
             candidate_buffer_list=flatten_buffer(self.candidate_buffer, rollout_length, num_states),
             action_buffer_flat=flatten_action_buffer(self.action_buffer, rollout_length, num_states, device=device),
@@ -257,14 +265,18 @@ def train_policy_from_rollout(
     old_log_prob_flat = prepared_rollout.log_prob_buffer_flat.detach()
     value_targets_flat = prepared_rollout.value_targets.reshape(-1).detach()
     old_value_estimate_flat = prepared_rollout.value_buffer_tensor.reshape(-1).detach()
-    valid_mask_flat = prepared_rollout.valid_mask_flat.detach()
+    sample_mask = prepared_rollout.sample_valid_mask_flat
+    if sample_mask is None:
+        sample_mask = torch.ones_like(prepared_rollout.valid_mask_flat)
+    sample_indices = sample_mask.nonzero(as_tuple=False).reshape(-1).cpu().tolist()
+    valid_mask_flat = prepared_rollout.valid_mask_flat.detach() & sample_mask
     valid_mask_cpu = valid_mask_flat.cpu().tolist()
     advantages_flat = normalize_advantages_masked(
         prepared_rollout.advantages.reshape(-1).detach(),
         valid_mask_flat,
     )
 
-    num_samples = len(state_buffer_list)
+    num_samples = len(sample_indices)
     if num_samples == 0:
         return PPOTrainStats(
             total_loss=0.0,
@@ -288,7 +300,7 @@ def train_policy_from_rollout(
 
     policy.train()
     for _epoch in range(int(num_epochs)):
-        permutation = torch.randperm(num_samples).tolist()
+        permutation = [sample_indices[i] for i in torch.randperm(num_samples).tolist()]
         for start in range(0, num_samples, int(batch_size)):
             if memory_guard is not None:
                 memory_guard()
@@ -345,7 +357,7 @@ def train_policy_from_rollout(
             total_policy_weight += actionable_count
             total_valid_action_samples += actionable_count
 
-    explained_variance = compute_explained_variance(old_value_estimate_flat, value_targets_flat)
+    explained_variance = compute_explained_variance(old_value_estimate_flat[sample_mask], value_targets_flat[sample_mask])
     avg_total_loss = total_loss_sum / max(1, total_value_weight)
     avg_value_loss = total_value_loss_sum / max(1, total_value_weight)
     avg_policy_loss = total_policy_loss_sum / max(1, total_policy_weight)

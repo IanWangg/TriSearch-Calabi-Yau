@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from copy import copy
 from dataclasses import dataclass
+from itertools import islice
 from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -10,7 +11,8 @@ import torch
 from torch_geometric.data import Batch, Data
 
 from core.cy_data_utils import create_data_from_cy_state_with_subcomplex, get_cached_transformed_vertices
-from core.cy_two_face_data import create_two_face_data_from_state
+from core.cy_two_face_data import create_two_face_data_from_state, TwoFaceContextData
+from core.cy_episode_context import EpisodeContext
 from core.vertex_augmentation import SimilarityTransform
 from core.vertex_preprocessing import VertexPreprocessor
 from mdp.cy_graph import CanonicalAction
@@ -148,6 +150,7 @@ def build_cy_data_list(
     subcomplex_width: Optional[int] = None,
     vertex_preprocessor: VertexPreprocessor | None = None,
     trajectory_transforms: Sequence[SimilarityTransform] | None = None,
+    episode_contexts: Sequence[EpisodeContext] | None = None,
     include_simplex_topology: bool = False,
     observation_kind: str = "full_triangulation",
 ) -> List[Data]:
@@ -155,6 +158,8 @@ def build_cy_data_list(
         raise ValueError("states and action_lists must have the same length.")
     if trajectory_transforms is not None and len(trajectory_transforms) != len(states):
         raise ValueError("trajectory_transforms must have one transform per state.")
+    if episode_contexts is not None and len(episode_contexts) != len(states):
+        raise ValueError("episode_contexts must have one context per state.")
     if len(states) == 0:
         return []
 
@@ -165,7 +170,13 @@ def build_cy_data_list(
             raise ValueError("two_face v1 requires raw coordinates without preprocessing or augmentation.")
         if include_simplex_topology:
             raise ValueError("two_face observation cannot include full simplex topology.")
-        return [create_two_face_data_from_state(state, actions) for state, actions in zip(states, action_lists)]
+        data_list = [create_two_face_data_from_state(state, actions) for state, actions in zip(states, action_lists)]
+        if episode_contexts is not None:
+            data_list = [TwoFaceContextData(**data.to_dict(), episode_context=torch.tensor(
+                [context.features()], dtype=torch.float32)) for data, context in zip(data_list, episode_contexts)]
+        return data_list
+    if episode_contexts is not None:
+        raise ValueError("Episode context requires two_face observations.")
     if observation_kind != "full_triangulation":
         raise ValueError(f"Unknown observation_kind {observation_kind!r}.")
 
@@ -241,6 +252,9 @@ class PolicyRolloutStepResult:
     intrinsic_bonus: List[float] | None = None
     training_rewards: List[float] | None = None
     observation_kind: str = "full_triangulation"
+    sample_valid_mask: torch.Tensor | None = None
+    objective_values: List[float] | None = None
+    objective_query_sec: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -314,6 +328,7 @@ class PolicyScoreResult:
 def evaluate_policy_scores(
     states: Sequence[Any], action_lists: Sequence[Sequence[CanonicalAction]], policy: Any,
     *, device: torch.device, value_only: bool = False, max_graph_size: int | None = None,
+    episode_contexts: Sequence[EpisodeContext] | None = None,
 ) -> PolicyScoreResult:
     """Shared inference without sampling; callers own search rules and RNGs.
 
@@ -330,6 +345,7 @@ def evaluate_policy_scores(
         states, [()] * len(states) if value_only and policy_observation_kind(policy) == "two_face" else action_lists,
         include_simplex_topology=_policy_uses_simplex_topology(policy),
         observation_kind=policy_observation_kind(policy),
+        episode_contexts=episode_contexts,
     )
     build_sec = time.perf_counter() - start
     with torch.inference_mode():
@@ -349,6 +365,7 @@ def batched_policy_action_selection(
     deterministic: bool = False,
     vertex_preprocessor: VertexPreprocessor | None = None,
     trajectory_transforms: Sequence[SimilarityTransform] | None = None,
+    episode_contexts: Sequence[EpisodeContext] | None = None,
 ) -> PolicyActionSelectionResult:
     if len(states) != len(action_lists):
         raise ValueError("states and action_lists must have the same length.")
@@ -370,6 +387,7 @@ def batched_policy_action_selection(
         trajectory_transforms=trajectory_transforms,
         include_simplex_topology=include_simplex_topology,
         observation_kind=policy_observation_kind(policy),
+        episode_contexts=episode_contexts,
     )
     data_build_sec = time.perf_counter() - data_build_start
 
@@ -432,6 +450,28 @@ def batched_policy_action_selection(
     )
 
 
+def query_objective_values(states, objective_function, batch_objective_function=None):
+    """Consume one ordered batch completely before any subsequent geometry work.
+
+    Scalar callbacks remain supported for custom objectives and reference runs.
+    Closing on error also releases the managed pool's single-iterator guard.
+    """
+    if not states:
+        return []
+    if batch_objective_function is None:
+        return [float(objective_function(state)) for state in states]
+    values = iter(batch_objective_function(states))
+    try:
+        result = [float(value) for value in islice(values, len(states) + 1)]
+        if len(result) != len(states):
+            raise ValueError(f"Objective batch returned {len(result)} values for {len(states)} states.")
+        return result
+    finally:
+        close = getattr(values, "close", None)
+        if close is not None:
+            close()
+
+
 def rollout_step_with_policy(
     engine: CYRandomRolloutEngine,
     states: Sequence[Any],
@@ -447,17 +487,37 @@ def rollout_step_with_policy(
     transition_mp_min_batch: int = 32,
     vertex_preprocessor: VertexPreprocessor | None = None,
     trajectory_transforms: Sequence[SimilarityTransform] | None = None,
+    episode_contexts: Sequence[EpisodeContext] | None = None,
+    active_mask: Sequence[bool] | None = None,
+    reset_on_done: bool = True,
+    objective_function=None,
+    batch_objective_function=None,
+    current_objective_values: Sequence[float] | None = None,
 ) -> PolicyRolloutStepResult:
     current_states = list(states)
+    active = [True] * len(states) if active_mask is None else list(active_mask)
+    if len(active) != len(states):
+        raise ValueError("active_mask must have one entry per state.")
+    if (objective_function is None) != (current_objective_values is None):
+        raise ValueError("objective_function and current_objective_values must be supplied together.")
+    if batch_objective_function is not None and objective_function is None:
+        raise ValueError("A batch objective requires objective_function and current_objective_values.")
+    objective_values = None if current_objective_values is None else list(current_objective_values)
+    if objective_values is not None and len(objective_values) != len(states):
+        raise ValueError("current_objective_values must have one entry per state.")
+    active_indices = [i for i, enabled in enumerate(active) if enabled]
 
     candidate_expand_start = time.perf_counter()
-    action_lists, expand_summary = engine.candidate_actions_for_states(
-        current_states,
+    active_actions, expand_summary = engine.candidate_actions_for_states(
+        [current_states[i] for i in active_indices],
         use_multiprocessing=use_multiprocessing,
         transition_pool=transition_pool,
         transition_mp_chunksize=transition_mp_chunksize,
         transition_mp_min_batch=transition_mp_min_batch,
     )
+    action_lists = [()] * len(states)
+    for i, actions in zip(active_indices, active_actions):
+        action_lists[i] = actions
     candidate_expand_sec = time.perf_counter() - candidate_expand_start
 
     selection = batched_policy_action_selection(
@@ -468,6 +528,7 @@ def rollout_step_with_policy(
         deterministic=deterministic,
         vertex_preprocessor=vertex_preprocessor,
         trajectory_transforms=trajectory_transforms,
+        episode_contexts=episode_contexts,
     )
 
     transition_apply_start = time.perf_counter()
@@ -481,6 +542,8 @@ def rollout_step_with_policy(
     collapsed_hits = 0
     dead_end_hits = 0
 
+    objective_indices = []
+    objective_query_sec = 0.0
     unique_nonterminal_next_keys: dict[str, Any] = {}
     reward_function = getattr(engine, "reward_function", None)
     objective_mode = reward_function is not None
@@ -488,6 +551,12 @@ def rollout_step_with_policy(
     if action_indices_cpu is None:
         action_indices_cpu = selection.action_index_tensor.detach().cpu().tolist()
     for idx, state in enumerate(current_states):
+        if not active[idx]:
+            transitioned_states.append(state)
+            dones[idx] = True
+            terminal_reasons[idx] = "inactive"
+            chosen_actions.append(None)
+            continue
         if action_indices_cpu[idx] < 0:
             transitioned_states.append(state)
             dones[idx] = True
@@ -524,7 +593,10 @@ def rollout_step_with_policy(
         transitioned_states.append(next_state)
         next_states[idx] = next_state
         if objective_mode:
-            rewards[idx] = float(reward_function(state, next_state))
+            if objective_values is None:
+                rewards[idx] = float(reward_function(state, next_state))
+            else:
+                objective_indices.append(idx)
         elif engine.is_target_state_fn(next_state):
             rewards[idx] = 1.0
             dones[idx] = True
@@ -532,6 +604,16 @@ def rollout_step_with_policy(
             frt_hits += 1
             continue
         unique_nonterminal_next_keys.setdefault(str(next_state.key), next_state)
+
+    if objective_indices:
+        objective_start = time.perf_counter()
+        queried_values = query_objective_values(
+            [next_states[idx] for idx in objective_indices], objective_function, batch_objective_function,
+        )
+        objective_query_sec = time.perf_counter() - objective_start
+        for idx, value in zip(objective_indices, queried_values):
+            objective_values[idx] = value
+            rewards[idx] = float(reward_function.from_objectives(current_objective_values[idx], value))
 
     nonterminal_next_states = list(unique_nonterminal_next_keys.values())
     next_expand_summary = engine.expand_states(
@@ -550,7 +632,7 @@ def rollout_step_with_policy(
             terminal_reasons[idx] = "dead_end_next"
             dead_end_hits += 1
 
-    reset_indices = [idx for idx, done in enumerate(dones) if done]
+    reset_indices = [idx for idx, done in enumerate(dones) if done and active[idx]] if reset_on_done else []
     if reset_indices:
         reset_states = engine.sample_initial_states(
             len(reset_indices),
@@ -592,6 +674,9 @@ def rollout_step_with_policy(
         transition_apply_sec=transition_apply_sec,
         data_list=selection.data_list,
         observation_kind=policy_observation_kind(policy),
+        sample_valid_mask=torch.tensor(active, dtype=torch.bool, device=device),
+        objective_values=objective_values,
+        objective_query_sec=objective_query_sec,
     )
 
 
@@ -603,6 +688,7 @@ def evaluate_policy_values(
     device: torch.device,
     vertex_preprocessor: VertexPreprocessor | None = None,
     trajectory_transforms: Sequence[SimilarityTransform] | None = None,
+    episode_contexts: Sequence[EpisodeContext] | None = None,
 ) -> PolicyValueResult:
     if len(states) != len(action_lists):
         raise ValueError("states and action_lists must have the same length.")
@@ -619,6 +705,7 @@ def evaluate_policy_values(
         trajectory_transforms=trajectory_transforms,
         include_simplex_topology=include_simplex_topology,
         observation_kind=policy_observation_kind(policy),
+        episode_contexts=episode_contexts,
     )
     data_build_sec = time.perf_counter() - data_build_start
 
@@ -749,6 +836,7 @@ def evaluate_policy_actions(
     device: torch.device,
     vertex_preprocessor: VertexPreprocessor | None = None,
     trajectory_transforms: Sequence[SimilarityTransform] | None = None,
+    episode_contexts: Sequence[EpisodeContext] | None = None,
 ) -> PolicyActionEvaluationResult:
     if len(states) != len(action_lists):
         raise ValueError("states and action_lists must have the same length.")
@@ -770,6 +858,7 @@ def evaluate_policy_actions(
         trajectory_transforms=trajectory_transforms,
         include_simplex_topology=include_simplex_topology,
         observation_kind=policy_observation_kind(policy),
+        episode_contexts=episode_contexts,
     )
     data_build_sec = time.perf_counter() - data_build_start
 

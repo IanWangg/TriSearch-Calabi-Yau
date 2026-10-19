@@ -63,6 +63,8 @@ def build_subcomplex_agent(
     act: str = "silu",
     subcomplex_actor_type: str = DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
     device="cpu",
+    training_reward_mode="step_log_volume",
+    episode_horizon=None,
 ) -> nn.Module:
     if mlp_hidden_channel_list is None:
         mlp_hidden_channel_list = [64]
@@ -77,8 +79,11 @@ def build_subcomplex_agent(
         return TwoFaceAgent(
             in_channels=in_channels, out_channels=out_channels, hidden_channels=hidden_channels,
             num_layers=num_layers, act=act, device=device,
+            training_reward_mode=training_reward_mode, episode_horizon=episode_horizon,
         )
 
+    if training_reward_mode != "step_log_volume":
+        raise ValueError("Episode context requires two_face_deep_sets.")
     agent_cls = get_subcomplex_agent_class(resolved_model_type)
     kwargs = dict(
         in_channels=in_channels,

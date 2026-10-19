@@ -91,6 +91,62 @@ Append `--use_wandb` to enable Wandb or use `--help` for all
 options. Paired SNN comparisons and stress commands are documented in the
 [two_face study](eval/sweep/two_face_model/README.md).
 
+### Best_so_far reward
+
+Use the finite-episode variant with the same dataset and resource controls:
+
+```bash
+conda activate sage
+bash train_cy_two_face_best_so_far_kcup.sh --gpu_index 0 --seed 0
+```
+
+This sets `--training_reward_mode best_so_far_log_volume`, `--gamma 1`,
+`--rollout_length 128`, and `--eval_steps 128`. Other launcher defaults are
+unchanged; caller arguments override them. Each environment tracks its own
+best volume, initialized from its starting state. The training reward is
+`log(best_next) - log(best_current)`: returning to an earlier record earns zero.
+The total episode reward is `log(best_final / initial_volume)`. This optimizes
+expected best log volume; improvements in raw volume means or baseline win
+rates must be measured separately.
+
+An episode ends at its horizon or a dead end, with zero bootstrap. Finished
+slots are not reset within that rollout, and padding is excluded from PPO
+losses and sample statistics. Both actor and critic receive
+`[log(current_volume), log(best_volume / current_volume), log(1 + remaining_steps)]`
+through a shared context MLP after the geometric encoder. Context is stored
+with each sampled observation, separately from cached geometry.
+
+Finite-episode training and periodic evaluation submit initial volumes and each
+step's selected destinations as ordered batches to the existing geometry worker
+pool. Known current volumes are reused; unselected neighbors and inactive slots
+are never queried. Batching preserves trajectory order, rewards and cache
+identity. `objective_query_sec` in rollout logs and iteration metrics measures
+the initial and destination objective queries, separately from PPO updates.
+`tools/benchmark_cy_volume_queries.py --output_dir <new_directory>` compares
+scalar and batched queries in fresh runtimes with identical seeded rollouts;
+it checks actions, terminal states, volumes, rewards and policy outputs before
+reporting speedup. Choose a free GPU with `--gpu_index` and store smoke artifacts
+under `eval/smoke_tests/results/`.
+
+The new observation schema is version 2. Checkpoints record the context fields,
+training horizon, reward mode and critic target (expected remaining improvement
+in best log volume); old checkpoints retain their existing architecture and
+schema. Use a fresh run directory when changing modes or the training horizon.
+Training metrics retain raw initial/final/best volumes and add the reward mode,
+episode lengths and termination reasons. `return.training_mean` contains the
+new training return; `return.mean` retains the original step-reward diagnostic.
+
+External evaluation supports these checkpoints with `--algorithms rl_stochastic_policy`
+and `--subcomplex_actor_type two_face_deep_sets`; use `--objective_budget 128`
+to match the default training horizon and `--policy_checkpoint` to select the
+new checkpoint directory. Context comes from each evaluation session's known
+objectives and remaining logical queries, including a free initial objective.
+The existing evaluation no-revisit rule remains in effect, whereas training
+can revisit states. Evaluation does not query unselected candidates to build
+context. BeFS/Beam variants reject these checkpoints because their scoring
+formula assumes the old critic target. See [evaluation instructions](eval/README.md)
+for setup and output-directory options.
+
 ### Training smoke
 
 One-iteration training smoke:

@@ -69,6 +69,11 @@ def run_evaluation(
     for name in spec.algorithms:
         if name not in factories:
             get_algorithm(name, **algorithm_options)  # Reject misspellings before loading data.
+    # Resolve checkpoint semantics before loading geometry or creating a result directory.
+    if policy is None and any(name.startswith("rl_") and name not in factories for name in spec.algorithms):
+        policy = EvaluationPolicy.from_spec(spec)
+    if getattr(policy, "requires_episode_context", False):
+        EvaluationPolicy.validate_context_algorithms(spec.algorithms, spec.reward_function)
     if setup is None:
         setup = prepare_eval_setup(spec)
     setup.validate(spec)
