@@ -36,6 +36,8 @@ class EvaluationPolicy:
         self.requires_episode_context = bool(getattr(model, "requires_episode_context", False))
         if self.requires_episode_context:
             self.metadata.update(model.model_config)
+            self.metadata.update(value_context_refresh="after_each_search_round",
+                                 proposal_context="round_start")
         self.observation_kind = getattr(model, "observation_kind", "full_triangulation")
         self.metadata.update(
             policy_observation_kind=self.observation_kind,
@@ -75,10 +77,15 @@ class EvaluationPolicy:
 
     @staticmethod
     def validate_context_algorithms(algorithms, objective_name="max_kcup"):
-        unsupported = [name for name in algorithms if name.startswith("rl_") and name != "rl_stochastic_policy"]
+        from eval.algorithm.rl import RL_ALGORITHM_NAMES
+        unsupported = [name for name in algorithms if name.startswith("rl_") and name not in RL_ALGORITHM_NAMES]
         if unsupported or objective_name != "max_kcup":
-            raise ValueError("best_so_far_log_volume checkpoint supports only rl_stochastic_policy with max_kcup; "
-                             "BeFS/Beam require a different critic scoring contract.")
+            raise ValueError("best_so_far_log_volume checkpoint requires a supported RL algorithm with max_kcup.")
+
+    @property
+    def value_score_definition(self):
+        return ("ln_best_objective_plus_discounted_remaining_best_gain"
+                if self.requires_episode_context else "ln_objective_plus_discounted_value")
 
     def reset_stats(self):
         self._stats = dict(action_batches=0, value_batches=0, action_states=0, value_states=0,

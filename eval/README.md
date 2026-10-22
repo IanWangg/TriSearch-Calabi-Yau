@@ -471,7 +471,19 @@ saved setups. Runtime caches remain separate between algorithms.
 proposal count and discount. `policy.resolved_policy_proposal_counts` records the
 actual count for each RL algorithm; the legacy singular field retains its
 value-beam resolution rule for compatibility. `policy.value_score_definitions`
-records `ln_objective_plus_discounted_value` for every value-search algorithm.
+records `ln_objective_plus_discounted_value` for legacy value-search checkpoints.
+For `best_so_far_log_volume` checkpoints, value beam and BeFS instead use
+`ln_best_objective_plus_discounted_remaining_best_gain`: after each round's
+objective queries finish, score each candidate using
+`ln(session_best_volume) + value_discount * V(state, session_best_volume, remaining_budget)`.
+BeFS also rescores every queued node against that same latest context before
+choosing its next parent. This requires network inference only, with no free
+neighbor expansion or repeated objective queries. Policy proposals use the
+context known at the start of the scheduling round. With `value_discount=1`,
+the score estimates final best log volume if the remaining budget were spent
+on a single rollout from that node; its use in tree search is a heuristic.
+Use a budget of 128 to match the default finite training horizon. The policy
+beam continues to rank by cumulative log probability and also receives context.
 Historical results are not rewritten: older `rl_value_*` runs may record
 `step_reward_plus_discounted_value` and must be interpreted using their original
 scoring metadata, rather than the current algorithm name alone. `summary.json` adds `policy_stats` with logical and

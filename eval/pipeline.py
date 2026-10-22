@@ -154,7 +154,7 @@ def run_evaluation(
                     policy_proposal_counts[name] = algorithms[0].proposal_count
                     definition = getattr(algorithms[0], "value_score_definition", None)
                     if definition is not None:
-                        value_score_definitions[name] = definition
+                        value_score_definitions[name] = getattr(policy, "value_score_definition", definition)
                     config["policy"] = {
                         **getattr(policy, "metadata", {"injected": True}),
                         "resolved_policy_proposal_count": spec.resolved_policy_proposal_count,

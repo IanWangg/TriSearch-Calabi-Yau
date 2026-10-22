@@ -230,9 +230,16 @@ def test_real_training_checkpoint_and_search_smoke(tmp_path, reward_mode):
         saved = json.loads((checkpoint_dir / "model_config.json").read_text())
         assert saved["training_reward_mode"] == reward_mode and saved["episode_horizon"] == 2
         for algorithm in ("rl_value_best_first", "rl_value_beam_search", "rl_policy_beam_search"):
-            with pytest.raises(ValueError, match="BeFS/Beam"):
-                run_evaluation(replace(spec, algorithms=(algorithm,)), setup, output_dir=tmp_path / algorithm)
-            assert not (tmp_path / algorithm).exists()
+            search_spec = replace(spec, algorithms=(algorithm,), objective_budget=4)
+            search = run_evaluation(search_spec, setup, output_dir=tmp_path / algorithm)
+            uncached = run_evaluation(replace(search_spec, cache_states=False), setup,
+                                      output_dir=tmp_path / (algorithm + "_uncached"))
+            assert search.rollouts == uncached.rollouts
+            read_comparison(search.output_dir)
+            config = json.loads((search.output_dir / "config.json").read_text())
+            if algorithm != "rl_policy_beam_search":
+                assert config["policy"]["value_score_definitions"][algorithm] == (
+                    "ln_best_objective_plus_discounted_remaining_best_gain")
         with pytest.raises(ValueError, match="model_config mismatch"):
             load_policy_checkpoint(two_face_policy(4), str(checkpoint_dir / "1.pth"), map_location="cpu")
         return

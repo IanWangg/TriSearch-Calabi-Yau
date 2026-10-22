@@ -156,6 +156,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 - `rl_value_beam_search`：每父节点取最多 `policy_proposal_count=m` 个 policy 提案，全部查询 objective；按 `ln(volume_child) + value_discount * V(child)` 保留下一层 top k。
 - `rl_value_best_first`：从全局 frontier 取上述 metric + value 分数最大的节点，每次只展开一个父节点，所有已查询的未展开子节点保留在全局优先队列中，不设置 frontier 上限。分数并列按首次发现顺序；初始节点直接展开，死路后继续处理其余 frontier。
 - RL value beam / BeFS 的 metric 明确为绝对 volume 的自然对数，不减父节点 metric，不累计路径 reward。直接复用已经查询的 child objective，不能为 metric 再查询。非 `max_kcup` 输入必须明确报错。`rl_metric_value_*` 仅是对应算法的兼容别名，不代表另一种评分规则。
+- `best_so_far_log_volume` checkpoint 的 critic 预测 remaining best-log-volume gain，value BeFS/Beam 改用 `ln(session_best_volume) + value_discount * V(state, session_best_volume, remaining_budget)`；默认训练 horizon 为 128，配对评估用 128 查询。每轮完整消费 objective 批次后以最新 session context 计算候选分数，BeFS 同时重算全部未展开队列节点；只推理网络，不重新查询 objective 或免费展开队列。policy 提案使用轮次开始时的已知 context。`value_discount=1` 为预计最终 best log volume 的单路径启发式，并不保证树搜索 value 校准。policy beam 仍按累计 log probability 排序。配置记录 `ln_best_objective_plus_discounted_remaining_best_gain`、`value_context_refresh=after_each_search_round` 与 `proposal_context=round_start`；旧 checkpoint 评分不变。
 - `RLAlgorithm.score_candidate` 接收已记录的父/子 objective；默认实现保留四参数 `score` 扩展兼容。两个 RL value 搜索均覆盖该入口使用绝对 metric，不调用 transition reward。
 - 仅包含 RL value 搜索（含兼容别名）的运行允许 `value_discount` 为任意非负有限系数（包括大于 1）；默认值为 0.9。其他运行保留 `[0,1]` 限制。大于 1 的 sweep 与已有 baseline 使用独立 run，通过共享 setup 配对比较。
 - `policy_proposal_count` 影响 value beam 和 value BeFS，允许正整数或 `-1`。省略时 value beam 随 `beam_width`，value BeFS 默认 **4**；BeFS 可显式传入其他正整数，且不受 `beam_width` 影响。`-1` 使用全部未发现邻居，完全跳过 actor logits。critic 使用所选模型的状态特征（SNN simplex 或 two-face Deep Sets），不能因为跳过 actor 而改用另一种 value 特征。
@@ -206,7 +207,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 
 - 每次运行创建新的结果目录，不覆盖已有 run。记录完整规格、setup 引用和校验标识、代码版本及依赖版本。
 - RL 额外记录解析后的 checkpoint 路径与 SHA256、模型与设备配置、提案数与 discount；`policy.resolved_policy_proposal_counts` 按算法记录实际提案数，旧单数字段保留 value beam 的解析规则以兼容旧结果。summary 记录逻辑 / 物理 inference batch、状态数、耗时和 CUDA 峰值分配。默认异步 CUDA 的细分时间是主机侧时间，精确计时使用 `profile_cuda_timing`。
-- `policy.value_score_definitions` 对所有 value 搜索记录 `ln_objective_plus_discounted_value`。历史结果不改写：旧 `rl_value_*` 可能记录 `step_reward_plus_discounted_value`，须按历史评分元数据解释，不能仅按当前算法名称解释。不改变结果格式版本或 setup 校验标识。
+- `policy.value_score_definitions` 对旧 critic 记录 `ln_objective_plus_discounted_value`，对 best-so-far critic 记录上文定义的 `ln_best_objective_plus_discounted_remaining_best_gain`。历史结果不改写：旧 `rl_value_*` 可能记录 `step_reward_plus_discounted_value`，须按历史评分元数据解释，不能仅按当前算法名称解释。不改变结果格式版本或 setup 校验标识。
 - 分开输出 objective 查询、逻辑展开、实际转移和每条 rollout 的汇总；保留真实预算消耗、超预算量和终止原因。`expansions.jsonl` 记录父节点 key/objective/depth、候选数、展开前后查询数和成功/失败状态。
 - 新结果的 `config.json` 和 `summary.json` 使用 `format_version=2`，所有算法移除 final 字段并增加 expansion 信息；setup 格式仍为 1。旧结果不重写，读取结果的后续工具须按版本处理字段差异。
 - 进入结果写入阶段后的异常保留已完成记录，并写入 `failure.json`。只有全部算法和起点成功完成后才写成功的 `summary.json`。

@@ -21,6 +21,7 @@ from reward_functions import get_reward
 class _ScoredNode:
     node: SearchNode
     score: float = 0.0
+    parent_key: str | None = None
 
 
 @dataclass
@@ -118,6 +119,48 @@ def _prepare_layer(trajectories, engine, policy, search_observer=None):
     return scheduled
 
 
+def _refresh_context_frontiers(trajectories, next_frontiers, policy, search_observer):
+    """Score known nodes against each search's latest record and budget.
+
+    A record-gain critic is history dependent. BeFS must refresh queued nodes
+    as well as new children, without expanding them or querying their volumes.
+    Call only after the objective iterator has been fully consumed.
+    """
+    entries, contexts = [], []
+    for trajectory in trajectories:
+        if trajectory.result is not None or not trajectory.algorithm.requires_values:
+            continue
+        children = next_frontiers[id(trajectory)]
+        new_queries = {item.node.query_index for item in children}
+        if trajectory.algorithm.is_best_first:
+            children.extend(row[2] for row in trajectory.pending_frontier)
+            trajectory.pending_frontier.clear()
+        for index, item in enumerate(children):
+            entries.append((trajectory, index, item, item.node.query_index in new_queries))
+            contexts.append(EpisodeContext(item.node.objective, trajectory.session.best_value,
+                                           trajectory.session.remaining_budget))
+    if not entries:
+        return
+    values = policy.score_values([item.node.state for _, _, item, _ in entries], episode_contexts=contexts)
+    if len(values) != len(entries):
+        raise ValueError("Policy returned the wrong number of critic values.")
+    for (trajectory, index, item, is_new), context, value in zip(entries, contexts, values):
+        value = float(value)
+        score = math.log(context.best_volume) + trajectory.algorithm.value_discount * value
+        if not math.isfinite(value) or not math.isfinite(score):
+            raise ValueError("Nonfinite contextual critic value or RL search score.")
+        next_frontiers[id(trajectory)][index] = _ScoredNode(item.node, score, item.parent_key)
+        if search_observer is not None:
+            session = trajectory.session
+            search_observer({
+                **session.identity, "event": "candidate_score" if is_new else "frontier_rescore",
+                "parent_key": item.parent_key, "state_key": item.node.state.key,
+                "search_key": session.state_key(item.node.state), "query_index": item.node.query_index,
+                "objective": item.node.objective, "critic": value, "score": score,
+                "best_objective": context.best_volume, "remaining_budget": context.remaining_steps,
+            })
+
+
 def run_batched_rollouts(
     initial_states, algorithms, engine, *, policy: PolicyScorer,
     objective_function, objective_goal, objective_budget, seeds, start_indices,
@@ -146,7 +189,8 @@ def run_batched_rollouts(
             raise ValueError(f"{algorithm.name} supports only {algorithm.supported_objectives}.")
     if policy is None:
         raise ValueError("RL evaluation requires a shared policy scorer.")
-    if getattr(policy, "requires_episode_context", False):
+    contextual = bool(getattr(policy, "requires_episode_context", False))
+    if contextual:
         from eval.policy import EvaluationPolicy
         EvaluationPolicy.validate_context_algorithms([algorithm.name for algorithm in algorithms], objective_name)
     if not initial_states:
@@ -202,7 +246,7 @@ def run_batched_rollouts(
             try:
                 scheduled = _prepare_layer(active, engine, policy, search_observer)
                 value_inputs = [(item, action, state) for item in scheduled
-                                if item.trajectory.algorithm.requires_values
+                                if item.trajectory.algorithm.requires_values and not contextual
                                 for action, state in item.states.items()]
                 if value_inputs:
                     values = policy.score_values([state for _, _, state in value_inputs])
@@ -232,7 +276,8 @@ def run_batched_rollouts(
                                 action = item.actions[index]
                                 evaluated = context.evaluate_action(action)
                                 trajectory.seen.add(session.state_key(evaluated.state))
-                                score = algorithm.score_candidate(
+                                deferred_value = contextual and algorithm.requires_values
+                                score = 0.0 if deferred_value else algorithm.score_candidate(
                                     item.parent.score,
                                     item.log_probabilities[index] if algorithm.requires_policy else 0.0,
                                     item.parent.node.objective, evaluated.objective, reward,
@@ -242,8 +287,9 @@ def run_batched_rollouts(
                                     raise ValueError("Nonfinite RL search score.")
                                 child = SearchNode(evaluated.state, evaluated.objective, evaluated.query_index,
                                                    item.parent.node.depth + 1)
-                                next_frontiers[id(trajectory)].append(_ScoredNode(child, float(score)))
-                                if search_observer is not None:
+                                next_frontiers[id(trajectory)].append(_ScoredNode(child, float(score),
+                                                                               item.parent.node.state.key))
+                                if search_observer is not None and not deferred_value:
                                     search_observer({
                                         **session.identity, "event": "candidate_score",
                                         "parent_key": item.parent.node.state.key,
@@ -262,6 +308,9 @@ def run_batched_rollouts(
                             trajectory.reason = "budget_exhausted"
                         if trajectory.reason is not None:
                             finish(trajectory)
+
+                if contextual:
+                    _refresh_context_frontiers(active, next_frontiers, policy, search_observer)
 
                 for trajectory in active:
                     if trajectory.result is not None:

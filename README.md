@@ -136,15 +136,21 @@ Training metrics retain raw initial/final/best volumes and add the reward mode,
 episode lengths and termination reasons. `return.training_mean` contains the
 new training return; `return.mean` retains the original step-reward diagnostic.
 
-External evaluation supports these checkpoints with `--algorithms rl_stochastic_policy`
-and `--subcomplex_actor_type two_face_deep_sets`; use `--objective_budget 128`
+External evaluation supports these checkpoints with the RL walk, policy beam,
+value beam and value BeFS algorithms and `--subcomplex_actor_type two_face_deep_sets`;
+use `--objective_budget 128`
 to match the default training horizon and `--policy_checkpoint` to select the
 new checkpoint directory. Context comes from each evaluation session's known
 objectives and remaining logical queries, including a free initial objective.
 The existing evaluation no-revisit rule remains in effect, whereas training
 can revisit states. Evaluation does not query unselected candidates to build
-context. BeFS/Beam variants reject these checkpoints because their scoring
-formula assumes the old critic target. See [evaluation instructions](eval/README.md)
+context. Value BeFS/Beam score nodes by `log(best_volume) + value_discount * V`
+using the latest session record and remaining query budget; queued BeFS nodes
+are rescored after each round without further objective queries. Use
+`--value_discount 1` for the unweighted expected final best log volume heuristic.
+Policy proposals use context at the start of the scheduling round. This adapts
+a critic trained on single walks to tree search and must be validated empirically.
+See [evaluation instructions](eval/README.md)
 for setup and output-directory options.
 
 ### Training smoke

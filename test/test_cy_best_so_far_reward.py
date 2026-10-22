@@ -16,7 +16,7 @@ from core.cy_policy_inference import (
 from core.cy_policy_rollout import collect_policy_rollout
 from core.cy_ppo import PPORolloutBuffer, train_policy_from_rollout
 from core.cy_training_config import parse_args
-from eval.algorithm import RLStochasticPolicy, RLValueBestFirst
+from eval.algorithm import RLStochasticPolicy, RLValueBestFirst, RLValueBeamSearch
 from eval.batched_rollout import run_batched_rollouts
 from eval.policy import EvaluationPolicy
 from mdp.cy_rollout import CYRandomRolloutEngine
@@ -105,8 +105,10 @@ def test_context_is_local_and_survives_batching_chunks_and_ppo():
     scorer = EvaluationPolicy(model, device="cpu")
     torch.testing.assert_close(torch.tensor(scorer.score_values(states, episode_contexts=contexts)),
                                selection.value_tensor.double())
-    with pytest.raises(ValueError, match="BeFS/Beam"):
-        scorer.validate_context_algorithms(["rl_value_best_first"])
+    scorer.validate_context_algorithms(["rl_value_best_first", "rl_value_beam_search", "rl_policy_beam_search"])
+    assert scorer.value_score_definition == "ln_best_objective_plus_discounted_remaining_best_gain"
+    with pytest.raises(ValueError, match="max_kcup"):
+        scorer.validate_context_algorithms(["rl_value_best_first"], "max_cy_volume")
     # Both heads actually train the context path.
     (scored.value_tensor.sum() + scored.log_prob_tensor[:2].sum()).backward()
     assert model.context_mlp[0].weight.grad[:, -3:].abs().sum() > 0
@@ -232,9 +234,79 @@ def test_search_context_is_per_session_and_uses_existing_query_budget(tmp_path, 
         else:
             assert policy.contexts == [EpisodeContext(8, 8, 2), EpisodeContext(4, 4, 2), EpisodeContext(4, 8, 1)]
             assert [item.objective_queries for item in result] == [2, 1]
-        with pytest.raises(ValueError, match="BeFS/Beam"):
+        with pytest.raises(ValueError, match="max_kcup"):
             run_batched_rollouts([starts[0]], [RLValueBestFirst()], engine, policy=policy,
-                objective_function=None, objective_goal="max", objective_budget=budget, seeds=[0], start_indices=[0])
+                objective_function=None, objective_name="max_cy_volume", objective_goal="max",
+                objective_budget=budget, seeds=[0], start_indices=[0])
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("cache", [False, True])
+@pytest.mark.parametrize("best_first", [False, True])
+def test_context_search_scores_known_objectives_and_refreshes_queued_frontier(tmp_path, cache, best_first):
+    pool = GraphPool([[1, 2], [3], [4], [5], [], []], [1., 2., 3., 10., 20., 30.])
+    pool.batch_open = False
+    contexts = []
+    class ContextScorer(GraphPolicy):
+        requires_episode_context = True
+
+        def score_actions(self, states, action_lists, *, episode_contexts=None):
+            assert all(context.best_volume >= context.current_volume for context in episode_contexts)
+            return super().score_actions(states, action_lists)
+
+        def score_values(self, states, *, episode_contexts=None):
+            assert not pool.batch_open
+            contexts.extend(episode_contexts)
+            values = []
+            for state, context in zip(states, episode_contexts):
+                index = self.index(state)
+                assert index in pool.objective_calls  # No critic inference before objective queries finish.
+                assert context.current_volume == pool.values[index]
+                if best_first:
+                    value = 3 if index == 1 else (5 if index == 2 and context.best_volume >= 10 else
+                                                  1 if index == 2 else 0)
+                else:
+                    value = .2 if index == 1 else 0
+                values.append(value)
+            return values
+
+    source = pool.states[0]
+    policy = ContextScorer(pool)
+    engine = CYRandomRolloutEngine(base_states={source.key: source}, initial_states=[source],
+        polytope_by_index={0: source.configuration}, neighbor_mode="two_neighbors",
+        include_points_interior_to_facets=False, reward_function=lambda a, b: 0,
+        transition_pool=pool, state_cache_mode="lru" if cache else "none",
+        cache_budget_bytes=1000000 if cache else 0, history_path=str(tmp_path / "states.sqlite3"))
+    algorithm = RLValueBestFirst(2, value_discount=1) if best_first else RLValueBeamSearch(1, 2, 1)
+    events, queries, expansions = [], [], []
+    def batch_objectives(states):
+        pool.batch_open = True
+        try:
+            yield from engine.objective_values(states, "max_kcup")
+        finally:
+            pool.batch_open = False
+    try:
+        result = run_batched_rollouts([source], [algorithm], engine, policy=policy,
+            objective_function=lambda state: engine.objective_value(state, "max_kcup"), objective_goal="max",
+            objective_budget=5 if best_first else 3, seeds=[0], start_indices=[0],
+            batch_objective_function=batch_objectives,
+            on_query=queries.append, on_expansion=expansions.append, search_observer=events.append)[0]
+        assert contexts[:2] == [EpisodeContext(2, 3, 3 if best_first else 1),
+                                EpisodeContext(3, 3, 3 if best_first else 1)]
+        assert result.best_objective == (30 if best_first else 10)
+        assert result.objective_queries == (5 if best_first else 3)
+        assert len(queries) == len(pool.objective_calls) == result.objective_queries + 1
+        assert result.transition_count == 0
+        assert result.termination_reason == "budget_exhausted"
+        if best_first:
+            assert EpisodeContext(3, 10, 2) in contexts  # Queued node gets new record and budget.
+            assert [event["state_key"] for event in expansions] == [pool.states[i].key for i in (0, 1, 2, 3)]
+            assert any(event["event"] == "frontier_rescore" for event in events)
+        scored = [event for event in events if event["event"] == "candidate_score"]
+        assert scored[0]["score"] == pytest.approx(math.log(3) + (3 if best_first else .2))
+        if not cache:
+            assert not engine.nodes_by_key
     finally:
         engine.close()
 
