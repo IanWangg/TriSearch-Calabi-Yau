@@ -1,0 +1,85 @@
+{
+  "created_at_utc": "2026-10-22T21:12:26.494477+00:00",
+  "budget": 128,
+  "h11": 30,
+  "polytopes": [
+    1,
+    4,
+    6,
+    10,
+    11
+  ],
+  "start_index": 0,
+  "sources": [
+    {
+      "name": "current_rollout",
+      "label": "Current RL rollout (598)",
+      "path": "current/eval/sweep/best_so_far_search_20261022_194142/results/h11_30/algorithms/rl_stochastic_policy",
+      "primary": true
+    },
+    {
+      "name": "current_befs",
+      "label": "Current RL BeFS (598)",
+      "path": "current/eval/sweep/best_so_far_search_20261022_194142/results/h11_30/algorithms/rl_value_best_first",
+      "primary": true
+    },
+    {
+      "name": "befs",
+      "label": "BeFS",
+      "path": "current/eval/sweep/best_so_far_search_20261022_194142/results/h11_30/algorithms/best_first",
+      "primary": true
+    },
+    {
+      "name": "ga",
+      "label": "GA (historical)",
+      "path": "historical/eval/results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310/results/non_favorable_cyopt_ga",
+      "primary": true
+    },
+    {
+      "name": "old_600_befs",
+      "label": "Previous RL BeFS (600)",
+      "path": "historical/eval/results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310/results/checkpoint_600_non_favorable_rl_value_best_first_preselection_greedy_4",
+      "primary": true
+    },
+    {
+      "name": "old_600_beam",
+      "label": "Previous RL Beam (600)",
+      "path": "historical/eval/results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310/results/checkpoint_600_non_favorable_rl_value_beam_search_preselection_greedy_4",
+      "primary": true
+    },
+    {
+      "name": "historical_befs",
+      "label": "BeFS (historical audit)",
+      "path": "historical/eval/results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310/results/non_favorable_best_first",
+      "primary": false
+    },
+    {
+      "name": "old_400_befs",
+      "label": "Previous RL BeFS (400)",
+      "path": "historical/eval/results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310/results/checkpoint_400_non_favorable_rl_value_best_first_preselection_greedy_4",
+      "primary": true
+    },
+    {
+      "name": "old_400_beam",
+      "label": "Previous RL beam_search (400)",
+      "path": "historical/eval/results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310/results/checkpoint_400_non_favorable_rl_value_beam_search_preselection_greedy_4",
+      "primary": false
+    },
+    {
+      "name": "old_800_beam",
+      "label": "Previous RL beam_search (800)",
+      "path": "historical/eval/results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310/results/checkpoint_800_non_favorable_rl_value_beam_search_preselection_greedy_4",
+      "primary": false
+    }
+  ],
+  "tie_relative_tolerance": 1e-06,
+  "current_checkpoint_iteration": 598,
+  "previous_primary_iteration": 600,
+  "selection": "All five historical non_favorable group starts, each matches current start 0 exactly; source group name is not an independently validated favorability claim.",
+  "prefix_reason": "Legacy searches do not condition their decisions on remaining horizon; GA checks remaining budget only to terminate fitness queries. Use original query prefixes, without replay or resampling.",
+  "limitations": [
+    "One shared start per polytope; these five pairs are a subset of the previous 25-pair current-model comparison.",
+    "Previous model uses step reward, discount/value weight 0.9 and old context-free critic; current model uses best-so-far reward with finite horizon 128 and critic weight 1.0. This is a comparison of trained methods, not an isolated reward ablation."
+  ],
+  "historical_checkpoint_reporting": "Checkpoint 600 is matched by training duration; all other completed greedy-top-4 checkpoints are also reported, including the stronger checkpoint-400 BeFS. No per-polytope oracle selection."
+}

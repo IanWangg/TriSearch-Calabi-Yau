@@ -5,20 +5,25 @@ from collections import defaultdict
 import json
 import math
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
+from eval.research_paths import resolve_archived_path
 
 
-def main(source):
+def main(source, historical_root=ROOT):
     with (source / "trajectories.jsonl").open() as stream:
         trajectories = [json.loads(line) for line in stream]
     metrics = pd.read_csv(source / "trajectory_metrics.csv")
-    legacy = pd.read_csv(ROOT / "eval/results/runs/h11_50_two_face_checkpoint_sweep_20261012_000945/plots_recorded/endpoints.csv")
+    legacy = pd.read_csv(historical_root / "eval/results/runs/h11_50_two_face_checkpoint_sweep_20261012_000945/plots_recorded/endpoints.csv")
+    legacy["source_run"] = legacy.source_run.map(
+        lambda path: str(resolve_archived_path(path, historical_root=historical_root)))
     derived = metrics[metrics.h11 == 50].copy()
-    derived["absolute_source_run"] = derived.source_run.map(lambda p: str(ROOT / p))
+    derived["absolute_source_run"] = derived.source_run.map(lambda p: str(historical_root / p))
     merged = derived.merge(legacy, left_on=["absolute_source_run", "polytope_index"],
                            right_on=["source_run", "polytope_index"], validate="one_to_one")
     assert len(merged) == len(derived) == len(legacy) == 440
@@ -49,7 +54,7 @@ def main(source):
     for h11, study in [(30, "h11_30_two_face_checkpoint_sweep_20261011_202310"),
                        (50, "h11_50_two_face_checkpoint_sweep_20261012_000945")]:
         for group in ["favorable", "non_favorable"]:
-            path = ROOT / "eval/results/runs" / study / "diagnostics" / f"node_degree_samples_{group}.jsonl"
+            path = historical_root / "eval/results/runs" / study / "diagnostics" / f"node_degree_samples_{group}.jsonl"
             with path.open() as stream:
                 for line in stream:
                     row = json.loads(line)
@@ -90,4 +95,6 @@ def main(source):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source_dir", type=Path, required=True)
-    main(parser.parse_args().source_dir)
+    parser.add_argument("--historical_root", type=Path, default=ROOT)
+    args = parser.parse_args()
+    main(args.source_dir, args.historical_root.resolve())

@@ -1,0 +1,25 @@
+{
+  "activation": "silu",
+  "actor_global_context": true,
+  "critic_target": "expected_remaining_best_log_volume_gain",
+  "episode_context_fields": [
+    "log_current_volume",
+    "log_best_gap",
+    "log_remaining_steps"
+  ],
+  "episode_horizon": 128,
+  "face_pooling": "sum",
+  "gamma": 1.0,
+  "global_pooling": "sum",
+  "hidden_channels": 64,
+  "in_channels": 4,
+  "model_type": "egnn",
+  "num_layers": 3,
+  "observation_kind": "two_face",
+  "observation_schema_version": 2,
+  "out_channels": 64,
+  "subcomplex_actor_type": "two_face_deep_sets",
+  "training_reward_mode": "best_so_far_log_volume",
+  "vertex_augmentation": false,
+  "vertex_preprocessing": "none"
+}

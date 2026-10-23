@@ -24,12 +24,14 @@ import numpy as np
 
 from eval.results.plotting import read_comparison, TWO_FACE_METRIC_REL_TOL
 from eval.setup import load_eval_setup
+from eval.research_paths import resolve_archived_path
 from mdp.cy_state_record import CYPointConfiguration, state_key, two_face_state_key
 
 SOURCES = {
     30: ROOT / "eval/results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310",
     50: ROOT / "eval/results/runs/h11_50_two_face_checkpoint_sweep_20261012_000945",
 }
+ARCHIVE_ROOT = ROOT
 BUDGET = 1000
 TOL = TWO_FACE_METRIC_REL_TOL
 
@@ -74,6 +76,8 @@ def source_jobs(study):
     for algorithm, entries in plan["reused_baselines"].items():
         jobs.extend(dict(e, algorithm=algorithm, group="favorable", iteration=None,
                          family="baseline", reused=True) for e in entries)
+    for job in jobs:
+        job["source_run"] = str(resolve_archived_path(job["source_run"], historical_root=ARCHIVE_ROOT))
     return plan, jobs
 
 
@@ -86,7 +90,7 @@ def ingest(destination):
         configurations = {}
         expected_initials = {}
         for group, entry in plan["group_setups"].items():
-            setup = load_eval_setup(entry["path"])
+            setup = load_eval_setup(resolve_archived_path(entry["path"], historical_root=ARCHIVE_ROOT))
             expected_initials[group] = {r["polytope_index"]: state_key(
                 r["polytope_index"], r["frst_list"][0]["simplices"], "two_neighbors") for r in setup.rows}
             raw = json.loads((study / "diagnostics" / f"configurations_{group}.json").read_text())
@@ -116,7 +120,7 @@ def ingest(destination):
                          checkpoint=checkpoint, algorithm=algorithm,
                          mode=job.get("policy_preselection_mode", "not_applicable"),
                          proposal_count=job.get("policy_proposal_count") if checkpoint is not None else None,
-                         source_run=str(run.relative_to(ROOT)), reused=job["reused"],
+                         source_run=str(run.relative_to(ARCHIVE_ROOT)), reused=job["reused"],
                          source_queries=rollout["objective_queries"], source_budget=data.spec["objective_budget"],
                          source_overshoot=rollout["budget_overshoot"], source_expansions=rollout["expansion_count"],
                          termination_reason=rollout["termination_reason"], queries=[], expansions=[],
@@ -192,7 +196,7 @@ def ingest(destination):
             for t in local.values():
                 assert len(t["queries"]) == min(t["source_queries"], BUDGET) + 1
                 assert math.isclose(max(q[3] for q in t["queries"]), t["curve"][-1], rel_tol=1e-12)
-            provenance.append(dict(h11=h11, source_run=str(run.relative_to(ROOT)),
+            provenance.append(dict(h11=h11, source_run=str(run.relative_to(ARCHIVE_ROOT)),
                                    native_validation="passed", raw_sha256=raw_hashes,
                                    checkpoint_sha256=data.policy_checkpoint_sha256, git_commit=config["environment"].get("git_commit")))
             if job_index % 5 == 0 or job_index == len(jobs) - 1:
@@ -373,7 +377,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--reuse_derived", action="store_true")
+    parser.add_argument("--historical_root", type=Path, default=ROOT)
     args = parser.parse_args()
+    ARCHIVE_ROOT = args.historical_root.resolve()
+    SOURCES = {h11: ARCHIVE_ROOT / source.relative_to(ROOT) for h11, source in SOURCES.items()}
     if not args.reuse_derived:
         ingest(args.output_dir)
     analyze(args.output_dir)

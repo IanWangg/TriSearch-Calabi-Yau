@@ -1,0 +1,12 @@
+{
+  "snn_base_rl_metric_value_best_first": "historical/eval/results/runs/h11_50_metric_value_policy_top_4_20260927_044127/algorithms/rl_metric_value_best_first",
+  "snn_base_rl_metric_value_beam_search": "historical/eval/results/runs/h11_50_metric_value_policy_top_4_20260927_044127/algorithms/rl_metric_value_beam_search",
+  "snn_base_all_rl_metric_value_best_first": "historical/eval/results/runs/h11_50_metric_value_no_policy_filter_20260927_044127/algorithms/rl_metric_value_best_first",
+  "snn_base_all_rl_metric_value_beam_search": "historical/eval/results/runs/h11_50_metric_value_no_policy_filter_20260927_044127/algorithms/rl_metric_value_beam_search",
+  "entropy_coef_0_01_rl_value_best_first": "historical/eval/sweep/checkpoint_600_h11_50/results/entropy_coef_0_01_rl_value_best_first_20261005_184214",
+  "num_states_512_rl_value_best_first": "historical/eval/sweep/checkpoint_600_h11_50/results/num_states_512_rl_value_best_first_20261005_184214",
+  "entropy_coef_0_01_rl_value_beam_search": "historical/eval/sweep/checkpoint_600_h11_50/results/entropy_coef_0_01_rl_value_beam_search_20261005_184214",
+  "num_states_512_rl_value_beam_search": "historical/eval/sweep/checkpoint_600_h11_50/results/num_states_512_rl_value_beam_search_20261005_184214",
+  "best_first": "historical/eval/results/runs/h11_50_metric_value_policy_top_4_20260927_044127/algorithms/best_first",
+  "cyopt_ga": "historical/eval/results/runs/h11_50_two_face_checkpoint_sweep_20261012_000945/results/non_favorable_cyopt_ga"
+}

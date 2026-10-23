@@ -47,3 +47,24 @@ ckpt/runs/
 /eval/sweep/two_face_trajectory_analysis_20261018/*
 !/eval/sweep/two_face_trajectory_analysis_20261018/README.md
 !/eval/sweep/two_face_trajectory_analysis_20261018/scripts/
+
+# Research sources only; local data, weights and generated outputs remain ignored.
+!/eval/sweep/best_so_far_search_20261022_194142/
+/eval/sweep/best_so_far_search_20261022_194142/*
+!/eval/sweep/best_so_far_search_20261022_194142/README.md
+!/eval/sweep/best_so_far_search_20261022_194142/configs/
+!/eval/sweep/best_so_far_search_20261022_194142/scripts/
+
+# Research sources only; local data, weights and generated outputs remain ignored.
+!/eval/sweep/best_so_far_history_comparison_20261022_211226/
+/eval/sweep/best_so_far_history_comparison_20261022_211226/*
+!/eval/sweep/best_so_far_history_comparison_20261022_211226/README.md
+!/eval/sweep/best_so_far_history_comparison_20261022_211226/configs/
+!/eval/sweep/best_so_far_history_comparison_20261022_211226/scripts/
+
+# Research sources only; local data, weights and generated outputs remain ignored.
+!/eval/sweep/rl_attempts_summary_20261023_201927/
+/eval/sweep/rl_attempts_summary_20261023_201927/*
+!/eval/sweep/rl_attempts_summary_20261023_201927/README.md
+!/eval/sweep/rl_attempts_summary_20261023_201927/configs/
+!/eval/sweep/rl_attempts_summary_20261023_201927/scripts/

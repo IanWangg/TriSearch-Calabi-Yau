@@ -4,6 +4,8 @@
 
 分析于 2026_10_18 完成，未修改模型、训练、evaluation 核心逻辑或原始结果，未运行新训练、几何展开、KCUP 求值或 policy inference。全部分析使用 `sage` 环境。
 
+本目录仅发布源码和说明。下文图表、CSV、原始研究路径均指本地归档或可重新生成的产物，不随 Git 上传。
+
 ## 数据与适用范围
 
 | 数据 | 完整 source runs | 完整 trajectories | polytope 数 | 状态 |
@@ -14,13 +16,13 @@
 
 原始研究：
 
-- [h11_30 sweep](../../results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310/README.md)
-- [h11_50 sweep](../../results/runs/h11_50_two_face_checkpoint_sweep_20261012_000945/README.md)
+- h11_30 sweep（本地路径 `../../results/runs/h11_30_two_face_checkpoint_sweep_20261011_202310/README.md`）
+- h11_50 sweep（本地路径 `../../results/runs/h11_50_two_face_checkpoint_sweep_20261012_000945/README.md`）
 - checkpoint：`runs/cy_two_face_kcup_h11_15_20261008_112756_477353/checkpoints/{400,600,800}.pth`。
 
 训练来自 h11=15，评估使用 h11=30/50。每组各有五个 favorable 和五个 non_favorable polytope，按原研究的来源顺序选择，不能当作整个数据集的均匀随机样本。每个配置只有一个 search seed（0）和每 polytope 一个起点。
 
-**版本边界：这些 evaluation 使用 commit `1866f7c` 时的网络，checkpoint 确实包含 `triangle_dual.0.*` 与 `triangle_dual.1.*` 权重。当前分支 `90231dd` 已简化 two_face encoder，去掉该部分。这里的结果属于保存的旧 checkpoint，不能直接当作当前简化模型的性能，也未用不兼容的新结构重新加载旧权重。**
+**版本边界：这些 evaluation 使用 commit `1866f7c` 时的网络，checkpoint 确实包含 `triangle_dual.0.*` 与 `triangle_dual.1.*` 权重。commit `90231dd` 简化了 two_face encoder，去掉该部分；整合版本以 `--two_face_encoder triangle_dual` 保留原结构，以 `deep_sets` 选择简化结构。这里的结果属于保存的旧 checkpoint，不能直接当作当前简化模型的性能，也未用不兼容的新结构重新加载旧权重。**
 
 所有端点统一使用 `query_index <= 1000` 的原始 best CY volume；起点免费，超预算尾部排除。历史 favorable baseline 的 native 预算可以大于 1000，仍保留原 metadata。比较先在同一 polytope 上算 ratio，再取中位数；不是两个 cohort 中位数的比值。差异在 `1e-6` 相对容差内视为平局。未完成配置不填零，不参与统计。
 
@@ -41,7 +43,7 @@ h11=30 的 checkpoint 600 favorable BeFS 未完成，不能把五个 non_favorab
 
 h11=50 上，400 / BeFS / stochastic_8 对普通 BeFS 的逐 polytope ratio 范围是 **0.00809 到 253.48**；中位数有优势仍可能包含严重失败。它只在 3/10 polytope 胜 GA。GA 使用 DNA 交叉/变异，不受相同局部 flip 邻接限制；这里比较的是逻辑 objective 查询效率，不是等同的搜索动作，也没有新增 wall_time benchmark。
 
-完整证据：[h11_50 端点热图](plots/analysis_20261018_02/h11_50_paired_endpoint_heatmap.png)、[h11_30 端点热图](plots/analysis_20261018_02/h11_30_paired_endpoint_heatmap.png)、[逐配置配对汇总](plots/analysis_20261018_02/paired_summary_all_polytopes.csv)、[分组配对汇总](plots/analysis_20261018_02/paired_summary_by_group.csv)。所有图另存 PDF。
+完整证据：h11_50 端点热图（本地路径 `plots/analysis_20261018_02/h11_50_paired_endpoint_heatmap.png`）、h11_30 端点热图（本地路径 `plots/analysis_20261018_02/h11_30_paired_endpoint_heatmap.png`）、逐配置配对汇总（本地路径 `plots/analysis_20261018_02/paired_summary_all_polytopes.csv`）、分组配对汇总（本地路径 `plots/analysis_20261018_02/paired_summary_by_group.csv`）。所有图另存 PDF。
 
 ## 图上的搜索行为
 
@@ -84,9 +86,9 @@ favorable P0 的 RL 最佳路径包含 12 次显著下降，最大相对历史�
 
 non_favorable P2 则相反：RL 最深到 51 层，普通 BeFS 到 42 层；RL 在第 500 至 1000 次查询期间 best 仅增加 0.00570 dex（约 1.3%），普通 BeFS 却在第 553 次查询找到 1.94e12。RL 并非没有走深，而是把预算用在了较差区域。仅凭日志无法进一步唯一分解为 actor 漏选、critic 错排或代表邻域差异。
 
-![已观测图与最佳祖先路径](plots/analysis_20261018_02/observed_graph_case_studies.png)
+已观测图与最佳祖先路径（本地路径 `plots/analysis_20261018_02/observed_graph_case_studies.png`）
 
-灰色密度是已查询状态数，不是图的均匀密度。彩线是最佳节点的真实父子祖先链，不是按时间把 BeFS 不同 frontier 节点连成一条物理轨迹。逐节点证据见 [case_paths](plots/analysis_20261018_02/graph_case_paths.csv)。
+灰色密度是已查询状态数，不是图的均匀密度。彩线是最佳节点的真实父子祖先链，不是按时间把 BeFS 不同 frontier 节点连成一条物理轨迹。逐节点证据见 case_paths（本地路径 `plots/analysis_20261018_02/graph_case_paths.csv`）。
 
 ## Actor 与 critic 分别提供了什么
 
@@ -124,7 +126,7 @@ h11=50 的 14 个 RL 配置 × 10 个 polytope 可完整配对：checkpoint 800 
 - 这 5 个状态共出现 37 次，均不是记录中的 running best 或预算端点 best。h11=50 原有几何诊断将四例归因于求解数值顺序；h11=30 新例没有重算几何，原因不作同样断言。“未成为 best”也不保证换求解器后搜索优先级完全不变。
 - 观测池最佳值仅用于描述性相对 gap，不是已知全局最优值。这里没有独立 SNN 对照，不能把跨架构性能优势归因于 two_face 表示。
 
-对应证据：[validation](results/analysis_20261018_01/validation.json)、[独立检查及数值例外](results/analysis_20261018_01/independent_validation.json)、[source hashes](results/analysis_20261018_01/provenance.json)、[逐轨迹诊断](results/analysis_20261018_01/trajectory_metrics.csv)、[图统计](results/analysis_20261018_01/graph_summary.csv)。
+对应证据：validation（本地路径 `results/analysis_20261018_01/validation.json`）、独立检查及数值例外（本地路径 `results/analysis_20261018_01/independent_validation.json`）、source hashes（本地路径 `results/analysis_20261018_01/provenance.json`）、逐轨迹诊断（本地路径 `results/analysis_20261018_01/trajectory_metrics.csv`）、图统计（本地路径 `results/analysis_20261018_01/graph_summary.csv`）。
 
 ## 下一步实验建议
 
@@ -141,13 +143,14 @@ h11=50 的 14 个 RL 配置 × 10 个 polytope 可完整配对：checkpoint 800 
 ```bash
 study_dir=eval/sweep/two_face_trajectory_analysis_20261018
 analysis_id=analysis_reproduction_01
+historical_root=/path/to/historical_archive
 mkdir -p "$study_dir/logs"
 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' \
   python -B "$study_dir/scripts/analyze_trajectories.py" \
-  --output_dir "$study_dir/results/$analysis_id" \
+  --historical_root "$historical_root" --output_dir "$study_dir/results/$analysis_id" \
   > "$study_dir/logs/${analysis_id}.log" 2>&1
 python -B "$study_dir/scripts/validate_analysis.py" \
-  --source_dir "$study_dir/results/$analysis_id" \
+  --source_dir "$study_dir/results/$analysis_id" --historical_root "$historical_root" \
   > "$study_dir/logs/${analysis_id}_validation.log" 2>&1
 python -B "$study_dir/scripts/render_analysis.py" \
   --source_dir "$study_dir/results/$analysis_id" \
