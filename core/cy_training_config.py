@@ -11,9 +11,11 @@ from mdp.cy_state_record import NEIGHBOR_MODES
 from models.subcomplex_policy_config import (
     DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
     SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
+    SUPPORTED_TWO_FACE_ENCODERS,
     normalize_subcomplex_actor_type,
     observation_kind_for_subcomplex_actor,
     value_feature_source_for_subcomplex_actor,
+    validate_two_face_encoder_options,
 )
 from reward_functions import CY_VOLUME_REWARD_TRANSFORMS, SUPPORTED_REWARDS
 
@@ -52,6 +54,8 @@ class CYTrainingConfig:
     out_channels: int
     num_layers: int
     subcomplex_actor_type: str
+    two_face_encoder: str | None
+    two_face_triangle_layers: int | None
     vertex_aug_enable: bool
     vertex_aug_prob: float
     vertex_aug_scale_min: float
@@ -230,6 +234,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
         help="Subcomplex actor architecture.",
     )
+    parser.add_argument("--two_face_encoder", choices=SUPPORTED_TWO_FACE_ENCODERS,
+                        help="Two-face encoder; fresh runs use deep_sets, checkpoints infer their saved encoder.")
+    parser.add_argument("--two_face_triangle_layers", type=int,
+                        help="Triangle dual message layers (default: saved depth, or 2 for fresh triangle_dual).")
     parser.add_argument(
         "--vertex_aug_enable",
         action=argparse.BooleanOptionalAction,
@@ -489,6 +497,9 @@ def validate_count_bonus_args(args: argparse.Namespace) -> None:
 
 
 def validate_two_face_training_args(args: argparse.Namespace) -> None:
+    validate_two_face_encoder_options(args.subcomplex_actor_type,
+                                     getattr(args, "two_face_encoder", None),
+                                     getattr(args, "two_face_triangle_layers", None))
     if getattr(args, "training_reward_mode", STEP_LOG_VOLUME) == BEST_SO_FAR_LOG_VOLUME:
         if args.subcomplex_actor_type != "two_face_deep_sets":
             raise ValueError("best_so_far_log_volume requires two_face_deep_sets.")
@@ -558,6 +569,8 @@ def build_training_variant_suffix(args: argparse.Namespace) -> str:
     )
     if subcomplex_actor_type != "mlp":
         suffix_parts.append(f"actor_{subcomplex_actor_type}")
+    if getattr(args, "two_face_encoder", None) == "triangle_dual":
+        suffix_parts.append(f"encoder_triangle_dual_layers_{args.two_face_triangle_layers or 2}")
     value_feature_source = value_feature_source_for_subcomplex_actor(subcomplex_actor_type)
     if value_feature_source != "egnn":
         suffix_parts.append(f"value_{value_feature_source}")

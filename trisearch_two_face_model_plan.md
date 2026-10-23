@@ -4,6 +4,12 @@
 
 第一版采用 **共享面内 EGNN → triangle dual GNN → Deep Sets → 局部 flip actor 与全局 critic**，注册为新的 `two_face_deep_sets` 模型。现有 `snn_simplex` 保留为对照。模型切换、搜索去重、探索计数分别配置，避免一次实验同时改变多个因素。
 
+当前整合版本保留本文的原始结构为 `--two_face_encoder triangle_dual`，其层数由
+`--two_face_triangle_layers` 指定，默认 2。简化结构 `deep_sets` 跳过 triangle dual
+消息层，是新训练的默认编码器；历史 checkpoint 省略 flag 时按 sidecar 自动识别。
+编码器与 `--training_reward_mode` 独立，两种结构均支持 step 和 best_so_far 奖励。
+当前用法及复现材料见 [README](README.md)。下文保留原设计方案及其研究假设。
+
 代码基准为 [IanWangg/TriSearch-Calabi-Yau 的 master 提交 eda14ae](https://github.com/IanWangg/TriSearch-Calabi-Yau/tree/eda14ae9a8bd3cfaeedbf4db9fdeb9cead6444fa)。以下新文件、字段和配置是拟新增接口。
 
 ## 1 当前代码已经具备的基础

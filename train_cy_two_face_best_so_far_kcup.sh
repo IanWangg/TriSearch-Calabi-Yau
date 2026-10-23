@@ -9,7 +9,7 @@ for arg in "$@"; do
       'Defaults: training_reward_mode=best_so_far_log_volume, gamma=1,' \
       '128 training steps and 128 evaluation steps. Other settings follow train_cy_two_face_kcup.sh.' \
       'Use a fresh RUN_ID or RUN_DIR; caller arguments override defaults.'
-    exec "${PYTHON_BIN:-/home/yiranwang/anaconda3/envs/sage/bin/python}" "${REPO_DIR}/scripts/train_cy.py" --help
+    exec "${PYTHON_BIN:-python}" "${REPO_DIR}/scripts/train_cy.py" --help
   fi
 done
 exec bash "${REPO_DIR}/train_cy_two_face_kcup.sh" \

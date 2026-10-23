@@ -90,8 +90,9 @@ def test_mixed_saved_and_rebuilt_buffer_uses_two_face_schema(saved_first):
 
 
 @pytest.mark.parametrize("save_data", [True, False])
-def test_ppo_chunks_preserve_losses_gradients_and_update(save_data):
-    model = two_face_policy()
+@pytest.mark.parametrize("encoder", ["deep_sets", "triangle_dual"])
+def test_ppo_chunks_preserve_losses_gradients_and_update(save_data, encoder):
+    model = two_face_policy(two_face_encoder=encoder)
     chunked = copy.deepcopy(model)
     states = [square_state(), square_state(one_face=True), square_state()]
     actions = [square_actions(states[0]), [], square_actions(states[2])]
@@ -121,8 +122,10 @@ def test_ppo_chunks_preserve_losses_gradients_and_update(save_data):
             **{**kwargs, "prepared_rollout": replace(prepared, observation_kind="full_triangulation")})
 
 
-def test_strict_checkpoint_metadata_round_trip_and_mismatch(tmp_path):
-    model = two_face_policy(4)
+@pytest.mark.parametrize("encoder", ["deep_sets", "triangle_dual"])
+@pytest.mark.parametrize("legacy_metadata", [True, False])
+def test_strict_checkpoint_metadata_round_trip_and_mismatch(tmp_path, encoder, legacy_metadata):
+    model = two_face_policy(4, two_face_encoder=encoder)
     path = tmp_path / "latest.pth"
     torch.save(model.state_dict(), path)
     with pytest.raises(ValueError, match="Missing model_config"):
@@ -130,6 +133,11 @@ def test_strict_checkpoint_metadata_round_trip_and_mismatch(tmp_path):
     # A new directory creates the sidecar and keeps the pure state_dict format.
     path = tmp_path / "new" / "latest.pth"
     save_policy_checkpoint(model, str(path))
+    if legacy_metadata:
+        sidecar = path.parent / "model_config.json"
+        saved = json.loads(sidecar.read_text())
+        del saved["two_face_encoder"]
+        sidecar.write_text(json.dumps(saved))
     spec = EvaluationSpec(1, 12, 1, 1, policy_checkpoint=str(path.parent), force_cpu=True,
         subcomplex_actor_type="two_face_deep_sets", in_channels=4, hidden_channels=8, out_channels=8, num_layers=2)
     restored = EvaluationPolicy.from_spec(spec)
@@ -139,6 +147,12 @@ def test_strict_checkpoint_metadata_round_trip_and_mismatch(tmp_path):
     before = sidecar.read_bytes()
     save_policy_checkpoint(model, str(path))
     assert sidecar.read_bytes() == before
+    other_encoder = "triangle_dual" if encoder == "deep_sets" else "deep_sets"
+    with pytest.raises(ValueError, match="model_config mismatch"):
+        EvaluationPolicy.from_spec(replace(spec, two_face_encoder=other_encoder))
+    if encoder == "triangle_dual":
+        with pytest.raises(ValueError, match="model_config mismatch"):
+            EvaluationPolicy.from_spec(replace(spec, two_face_triangle_layers=3))
     with pytest.raises(ValueError, match="model_config mismatch"):
         EvaluationPolicy.from_spec(replace(spec, num_layers=3))
     changed = json.loads(before)
@@ -171,8 +185,48 @@ def test_v1_training_constraints_and_builder_validation():
     assert torch.isfinite(value).all()
 
 
+@pytest.mark.parametrize("encoder,layers", [("deep_sets", 2), ("triangle_dual", 0), (None, True)])
+def test_encoder_options_reject_invalid_combinations(encoder, layers):
+    from models.subcomplex_policy_config import resolve_two_face_encoder_options
+
+    with pytest.raises(ValueError):
+        resolve_two_face_encoder_options(encoder, layers)
+    with pytest.raises(ValueError):
+        EvaluationSpec(1, 12, 1, 1, subcomplex_actor_type="two_face_deep_sets",
+                       two_face_encoder=encoder, two_face_triangle_layers=layers)
+
+
+def test_encoder_flags_require_two_face_and_preserve_defaults():
+    from models.subcomplex_policy_config import resolve_two_face_encoder_options
+    from scripts.eval_cy import parse_args as parse_eval_args
+
+    assert two_face_policy().model_config["two_face_encoder"] == "deep_sets"
+    assert resolve_two_face_encoder_options(saved_config={"triangle_num_layers": 3}) == dict(
+        two_face_encoder="triangle_dual", two_face_triangle_layers=3)
+    for options in (["--two_face_encoder", "triangle_dual"], ["--two_face_triangle_layers", "2"]):
+        with pytest.raises(ValueError, match="require two_face"):
+            validate_two_face_training_args(parse_args(options))
+    with pytest.raises(ValueError, match="require two_face"):
+        EvaluationSpec(1, 12, 1, 1, two_face_encoder="triangle_dual")
+    args = parse_eval_args(["--num_polytopes", "1", "--h11", "12", "--num_starts", "1",
+        "--objective_budget", "2", "--subcomplex_actor_type", "two_face_deep_sets",
+        "--two_face_encoder", "triangle_dual", "--two_face_triangle_layers", "3"])
+    assert args.two_face_encoder == "triangle_dual" and args.two_face_triangle_layers == 3
+
+
+@pytest.mark.parametrize("encoder", [None, "deep_sets", "triangle_dual"])
+def test_encoder_config_round_trip_preserves_auto_detection(tmp_path, encoder):
+    from scripts.eval_cy import parse_args as parse_eval_args
+
+    spec = EvaluationSpec(1, 12, 1, 2, subcomplex_actor_type="two_face_deep_sets", two_face_encoder=encoder)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(spec.to_dict()))
+    assert parse_eval_args(["--config", str(path)]).two_face_encoder == encoder
+
+
 @pytest.mark.parametrize("reward_mode", ["step_log_volume", "best_so_far_log_volume"])
-def test_real_training_checkpoint_and_search_smoke(tmp_path, reward_mode):
+@pytest.mark.parametrize("encoder", ["deep_sets", "triangle_dual"])
+def test_real_training_checkpoint_and_search_smoke(tmp_path, reward_mode, encoder):
     from eval.pipeline import run_evaluation
     from eval.setup import EvaluationSetup
     from eval.results.plotting import read_comparison
@@ -189,7 +243,7 @@ def test_real_training_checkpoint_and_search_smoke(tmp_path, reward_mode):
         "--hidden_channels", "8", "--out_channels", "8", "--num_layers", "2",
         "--transition_num_workers", "1", "--memory_budget_gb", "8", "--runtime_cache_gb", ".05",
         "--checkpoint_path", str(checkpoint_dir), "--iteration_metrics_path", str(tmp_path / "metrics.jsonl")]
-    command += ["--training_reward_mode", reward_mode]
+    command += ["--training_reward_mode", reward_mode, "--two_face_encoder", encoder]
     contextual = reward_mode == "best_so_far_log_volume"
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -197,6 +251,19 @@ def test_real_training_checkpoint_and_search_smoke(tmp_path, reward_mode):
         result = subprocess.run(command, cwd=root, env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
                                 stdout=stream, stderr=subprocess.STDOUT, timeout=180)
     assert result.returncode == 0, (logs / "training.log").read_text()
+    if encoder == "triangle_dual":
+        sidecar = checkpoint_dir / "model_config.json"
+        saved = json.loads(sidecar.read_text())
+        del saved["two_face_encoder"]
+        sidecar.write_text(json.dumps(saved))
+        before = sidecar.read_bytes()
+        # Resume an old-format checkpoint without an explicit encoder flag.
+        with (logs / "resume.log").open("w") as stream:
+            result = subprocess.run(command[:-2], cwd=root, env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+                                    stdout=stream, stderr=subprocess.STDOUT, timeout=180)
+        assert result.returncode == 0, (logs / "resume.log").read_text()
+        assert sidecar.read_bytes() == before
+        assert "Loaded policy checkpoint" in (logs / "resume.log").read_text()
     assert (checkpoint_dir / "1.pth").is_file() and (checkpoint_dir / "model_config.json").is_file()
     metrics = json.loads((tmp_path / "metrics.jsonl").read_text())
     assert metrics["iteration"] == 1

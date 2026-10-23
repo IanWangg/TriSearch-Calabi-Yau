@@ -9,6 +9,14 @@ from typing import Any
 import torch
 
 
+def canonical_policy_model_config(config):
+    """Fill only the encoder tag omitted by the two historical two_face formats."""
+    if isinstance(config, dict) and config.get("subcomplex_actor_type") == "two_face_deep_sets":
+        config = dict(config)
+        config.setdefault("two_face_encoder", "triangle_dual" if "triangle_num_layers" in config else "deep_sets")
+    return config
+
+
 def validate_policy_model_config(policy: Any, checkpoint_dir, *, allow_create: bool = False) -> None:
     """Require exact architecture metadata for new policies; preserve legacy loads."""
     directory = Path(checkpoint_dir)
@@ -16,7 +24,7 @@ def validate_policy_model_config(policy: Any, checkpoint_dir, *, allow_create: b
     expected = getattr(policy, "model_config", None)
     if path.exists():
         actual = json.loads(path.read_text(encoding="utf-8"))
-        if actual != expected:
+        if canonical_policy_model_config(actual) != canonical_policy_model_config(expected):
             raise ValueError(f"Checkpoint model_config mismatch: {path}")
         return
     if expected is None:

@@ -12,6 +12,7 @@ from .subcomplex_policy_config import (
     SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
     normalize_subcomplex_actor_type,
     value_feature_source_for_subcomplex_actor,
+    validate_two_face_encoder_options,
 )
 
 
@@ -65,11 +66,14 @@ def build_subcomplex_agent(
     device="cpu",
     training_reward_mode="step_log_volume",
     episode_horizon=None,
+    two_face_encoder=None,
+    two_face_triangle_layers=None,
 ) -> nn.Module:
     if mlp_hidden_channel_list is None:
         mlp_hidden_channel_list = [64]
     resolved_model_type = normalize_subcomplex_model_type(model_type)
     resolved_actor_type = normalize_subcomplex_actor_type(subcomplex_actor_type)
+    validate_two_face_encoder_options(resolved_actor_type, two_face_encoder, two_face_triangle_layers)
 
     if resolved_actor_type == "two_face_deep_sets":
         if resolved_model_type != "egnn" or not share_encoder:
@@ -80,6 +84,7 @@ def build_subcomplex_agent(
             in_channels=in_channels, out_channels=out_channels, hidden_channels=hidden_channels,
             num_layers=num_layers, act=act, device=device,
             training_reward_mode=training_reward_mode, episode_horizon=episode_horizon,
+            two_face_encoder=two_face_encoder, two_face_triangle_layers=two_face_triangle_layers,
         )
 
     if training_reward_mode != "step_log_volume":

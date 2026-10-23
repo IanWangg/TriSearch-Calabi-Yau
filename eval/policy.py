@@ -15,6 +15,7 @@ from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME
 from core.cy_policy_inference import evaluate_policy_scores
 from core.cy_runtime_utils import load_policy_checkpoint, resolve_training_device
 from models.subcomplex_policy_factory import build_subcomplex_agent
+from models.subcomplex_policy_config import normalize_subcomplex_actor_type, resolve_two_face_encoder_options
 
 
 class PolicyScorer(Protocol):
@@ -60,6 +61,9 @@ class EvaluationPolicy:
                       mlp_hidden_channel_list=[64], act="silu")
         config_path = path.parent / "model_config.json"
         saved = json.loads(config_path.read_text()) if config_path.is_file() else {}
+        if normalize_subcomplex_actor_type(spec.subcomplex_actor_type) == "two_face_deep_sets":
+            config.update(resolve_two_face_encoder_options(
+                spec.two_face_encoder, spec.two_face_triangle_layers, saved_config=saved))
         if saved.get("training_reward_mode") == BEST_SO_FAR_LOG_VOLUME:
             cls.validate_context_algorithms(spec.algorithms, spec.reward_function)
             config.update(training_reward_mode=BEST_SO_FAR_LOG_VOLUME, episode_horizon=saved["episode_horizon"])

@@ -8,6 +8,13 @@ per start. Defaults select 5 held-out h11=15 polytopes and 1 start each. Larger
 h11 generalization and the local-actor ablation are separate follow-up studies.
 These are runnable experiment templates, not claims of improved performance.
 
+Specify `--two_face_encoder deep_sets` for the simplified model or
+`--two_face_encoder triangle_dual --two_face_triangle_layers 2` for the original
+network. Both can use `--training_reward_mode best_so_far_log_volume` with
+`--gamma 1 --rollout_length 128 --eval_steps 128`. Keep the encoder fixed when
+isolating a reward change. Omitted encoder flags infer existing checkpoints'
+saved architecture; fresh training defaults to `deep_sets`.
+
 Run from the repository root with `conda activate sage`. The large dataset is
 ignored by Git and is not copied into a new worktree. Set `dataset_path` to the
 same existing input file for both models; the default training input is
@@ -15,7 +22,7 @@ same existing input file for both models; the default training input is
 in the original checkout.
 
 ```bash
-dataset_path=/home/yiranwang/combinartorics/TriSearch-Calabi-Yau/data/cy/output4d_hugging_face/cy_4d_h11_15_favorable_1000_frst_10.samples.jsonl
+dataset_path=data/cy/output4d_hugging_face/cy_4d_h11_15_favorable_1000_frst_10.samples.jsonl
 RUN_ID=snn_seed_0 bash train_cy_two_face_kcup.sh \
   --dataset_path "$dataset_path" --subcomplex_actor_type snn_simplex --seed 0
 RUN_ID=two_face_seed_0 bash train_cy_two_face_kcup.sh \
@@ -84,6 +91,11 @@ root in the `sage` environment. Each invocation requires a new output directory
 and writes incremental `report.json` evidence, including failures, timing and
 peak process RSS. Synthetic face grids exercise tensor scaling; they are not
 claimed to be realizable reflexive polytopes.
+
+Fresh stress runs default to `deep_sets`; pass `--two_face_encoder triangle_dual`
+to exercise the original encoder. Tensor checks infer the encoder/depth when
+given a historical step_reward checkpoint. Contextual checkpoints should use
+`search`, which constructs real per_session contexts through the shared evaluator.
 
 ```bash
 stress_run_id=$(date +%Y%m%d_%H%M%S)

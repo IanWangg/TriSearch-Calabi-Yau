@@ -39,9 +39,13 @@ def parse_args(argv=None):
     parser.add_argument("--ga_mutation_rate", type=float, default=EvaluationSpec.ga_mutation_rate)
     parser.add_argument("--policy_checkpoint", default=EvaluationSpec.policy_checkpoint,
                         help="Policy weights file or directory (latest.pth preferred).")
-    from models.subcomplex_policy_config import SUPPORTED_SUBCOMPLEX_ACTOR_TYPES
+    from models.subcomplex_policy_config import SUPPORTED_SUBCOMPLEX_ACTOR_TYPES, SUPPORTED_TWO_FACE_ENCODERS
 
     parser.add_argument("--subcomplex_actor_type", choices=SUPPORTED_SUBCOMPLEX_ACTOR_TYPES, default="snn_simplex")
+    parser.add_argument("--two_face_encoder", choices=SUPPORTED_TWO_FACE_ENCODERS,
+                        help="Infer from checkpoint metadata when omitted; fresh policies default to deep_sets.")
+    parser.add_argument("--two_face_triangle_layers", type=int,
+                        help="Optional explicit triangle_dual depth; must match checkpoint metadata.")
     for name in ("in_channels", "out_channels", "hidden_channels", "num_layers", "gpu_index", "policy_max_graph_size"):
         parser.add_argument(f"--{name}", type=int, default=getattr(EvaluationSpec, name))
     cpu = parser.add_mutually_exclusive_group()
@@ -98,7 +102,7 @@ def parse_args(argv=None):
             parser.error(str(exc))
         # argparse does not validate choices supplied through set_defaults.
         for action in parser._actions:
-            if action.dest in config and action.choices is not None:
+            if action.dest in config and action.choices is not None and config[action.dest] is not None:
                 value = config[action.dest]
                 values = value if isinstance(value, list) else [value]
                 if any(item not in action.choices for item in values):

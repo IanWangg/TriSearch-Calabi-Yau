@@ -30,6 +30,17 @@ from core.cy_ppo import PPORolloutBuffer, train_policy_from_rollout
 from core.cy_two_face_data import build_two_face_data, create_two_face_data_from_state
 from mdp.cy_state_record import CYPointConfiguration, CyStateRecord, canonical_simplices, two_face_restrictions
 from models.two_face_agent import TwoFaceAgent
+from models.subcomplex_policy_config import SUPPORTED_TWO_FACE_ENCODERS, resolve_two_face_encoder_options
+
+
+def stress_model(args):
+    saved = None
+    if args.mode == "tensors" and args.checkpoint:
+        path = Path(args.checkpoint).parent / "model_config.json"
+        saved = json.loads(path.read_text()) if path.is_file() else None
+    options = resolve_two_face_encoder_options(args.two_face_encoder, args.two_face_triangle_layers,
+                                               saved_config=saved)
+    return TwoFaceAgent(in_channels=4, **options)
 
 
 def rss_bytes():
@@ -87,7 +98,7 @@ def check_close(actual, expected):
 
 
 def stress_tensors(args, record):
-    model = TwoFaceAgent(in_channels=4).eval()
+    model = stress_model(args).eval()
     if args.checkpoint:
         from core.cy_runtime_utils import load_policy_checkpoint
         load_policy_checkpoint(model, args.checkpoint, map_location=torch.device("cpu"))
@@ -185,7 +196,7 @@ def selected_rows(args):
 
 
 def stress_ppo(args, record):
-    model = TwoFaceAgent(in_channels=4)
+    model = stress_model(args)
     states, candidates = [], []
     for index in range(48):
         configuration, restrictions, actions = grid_faces(1 + index % 8, 2 + index % 4)
@@ -247,7 +258,7 @@ def stress_geometry(args, record):
                                          for row in rows])
     configure_cy_data_tensor_caches(max_bytes=2**20, max_entries=4)
     checked_actions, observed = 0, set()
-    model = TwoFaceAgent(in_channels=4).eval()
+    model = stress_model(args).eval()
     with create_transition_pool(num_workers=2, memory_budget_gb=12, task_timeout_sec=180,
                                 initializer=configure_geometry_worker, initargs=(2**20,)) as pool:
         collection = build_cy_rollout_collection(rows, neighbor_mode="two_neighbors",
@@ -315,6 +326,7 @@ def stress_search(args, record):
     spec = EvaluationSpec(3, 12, 1, args.objective_budget, seed=23, two_face_state=True,
         algorithms=("rl_stochastic_policy", "rl_policy_beam_search", "rl_value_beam_search", "rl_value_best_first"),
         policy_checkpoint=args.checkpoint, subcomplex_actor_type="two_face_deep_sets", force_cpu=True,
+        two_face_encoder=args.two_face_encoder, two_face_triangle_layers=args.two_face_triangle_layers,
         transition_num_workers=2, memory_budget_gb=12, runtime_cache_gb=.005, max_hot_states=8,
         policy_max_graph_size=20000, policy_proposal_count=4, beam_width=3)
     setup = EvaluationSetup(rows, {"parameters": spec.setup_parameters(),
@@ -364,6 +376,8 @@ def main():
     parser.add_argument("--extra_dataset", help="Optional h11=15 training JSONL; test its 8 largest vertex counts.")
     parser.add_argument("--checkpoint", help="Default-size two_face checkpoint; required by search, optional for tensors.")
     parser.add_argument("--objective_budget", type=int, default=100)
+    parser.add_argument("--two_face_encoder", choices=SUPPORTED_TWO_FACE_ENCODERS)
+    parser.add_argument("--two_face_triangle_layers", type=int)
     args = parser.parse_args()
     if args.mode == "search" and not args.checkpoint:
         parser.error("search requires --checkpoint")

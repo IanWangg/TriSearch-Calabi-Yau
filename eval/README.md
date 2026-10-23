@@ -38,13 +38,13 @@ settings. Historical runs without the option are interpreted as `false`.
 
 ## Two_face_deep_sets policy
 
-Select `--subcomplex_actor_type two_face_deep_sets` and provide a newly trained
+Select `--subcomplex_actor_type two_face_deep_sets` and provide a
 checkpoint with its adjacent `model_config.json`. Architecture and observation
 schema must match exactly. Historical SNN checkpoints remain usable without a
 sidecar. New models are trained from scratch; loading weights does not resume
 optimizer or iteration state.
 
-The shared face-local EGNN and triangle dual GNN encode every ambient 2-face,
+The shared face-local EGNN and triangle readout encode every ambient 2-face,
 including faces without actions. Deep Sets conditions the local flip actor and
 the state-only critic. The network never receives full-FRST edges or simplices.
 Value-only inference does not enumerate outgoing actions. Raw ambient coordinates
@@ -59,6 +59,15 @@ explicit `--two_face_state` setting for both models in a comparison.
 
 See [the model comparison study](sweep/two_face_model/README.md) for training,
 held-out input preparation and paired evaluation commands.
+
+`--two_face_encoder {deep_sets,triangle_dual}` distinguishes the simplified
+encoder from the original encoder with triangle_dual message layers. Omitted
+options are inferred from `model_config.json`, including historical sidecars
+without an explicit encoder tag. `--two_face_triangle_layers` optionally checks
+the saved dual depth. Both options must match the weights; missing metadata or
+other architecture mismatches still fail. Sidecars are not rewritten.
+Encoder choice is independent of `two_face_state` and the checkpoint's reward
+mode; both encoders support the finite contextual critic described below.
 
 ## Directory organization
 

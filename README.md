@@ -91,6 +91,29 @@ Append `--use_wandb` to enable Wandb or use `--help` for all
 options. Paired SNN comparisons and stress commands are documented in the
 [two_face study](eval/sweep/two_face_model/README.md).
 
+The encoder and reward are independent switches:
+
+| Option | Values | Default for fresh training |
+| --- | --- | --- |
+| `--two_face_encoder` | `deep_sets`, `triangle_dual` | `deep_sets` |
+| `--two_face_triangle_layers` | Positive integer, only for `triangle_dual` | 2 |
+| `--training_reward_mode` | `step_log_volume`, `best_so_far_log_volume` | `step_log_volume` |
+
+For the original triangle_dual network, append `--two_face_encoder triangle_dual`.
+Both encoders support either reward. The generic training default actor remains
+`snn_simplex`; two_face encoder flags require `--subcomplex_actor_type two_face_deep_sets`.
+`--two_face_state` independently controls evaluation search identity.
+Training reloads and evaluation infer omitted encoder options from checkpoint
+metadata: historical `triangle_num_layers` identifies the original dual network,
+while its absence identifies the simplified encoder. Explicit incompatible
+options fail. Loading remains strict and does not rewrite existing sidecars.
+
+Published research sources: [trajectory analysis](eval/sweep/two_face_trajectory_analysis_20261018/README.md),
+[best_so_far search](eval/sweep/best_so_far_search_20261022_194142/README.md),
+[historical comparison](eval/sweep/best_so_far_history_comparison_20261022_211226/README.md),
+and [RL attempts](eval/sweep/rl_attempts_summary_20261023_201927/README.md).
+Generated data and model weights remain local; each study documents its inputs.
+
 ### Best_so_far reward
 
 Use the finite-episode variant with the same dataset and resource controls:

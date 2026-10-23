@@ -207,6 +207,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 
 - 每次运行创建新的结果目录，不覆盖已有 run。记录完整规格、setup 引用和校验标识、代码版本及依赖版本。
 - RL 额外记录解析后的 checkpoint 路径与 SHA256、模型与设备配置、提案数与 discount；`policy.resolved_policy_proposal_counts` 按算法记录实际提案数，旧单数字段保留 value beam 的解析规则以兼容旧结果。summary 记录逻辑 / 物理 inference batch、状态数、耗时和 CUDA 峰值分配。默认异步 CUDA 的细分时间是主机侧时间，精确计时使用 `profile_cuda_timing`。
+- `two_face_encoder` 与奖励模式、`two_face_state` 独立。省略编码器参数时从 checkpoint metadata 推断：旧配置含 `triangle_num_layers` 为 `triangle_dual`，否则为 `deep_sets`；显式编码器 / dual 深度必须匹配。仅在内存中补齐旧配置缺少的编码器标识，继续严格校验其他 metadata 和权重，不改写历史 sidecar。
 - `policy.value_score_definitions` 对旧 critic 记录 `ln_objective_plus_discounted_value`，对 best-so-far critic 记录上文定义的 `ln_best_objective_plus_discounted_remaining_best_gain`。历史结果不改写：旧 `rl_value_*` 可能记录 `step_reward_plus_discounted_value`，须按历史评分元数据解释，不能仅按当前算法名称解释。不改变结果格式版本或 setup 校验标识。
 - 分开输出 objective 查询、逻辑展开、实际转移和每条 rollout 的汇总；保留真实预算消耗、超预算量和终止原因。`expansions.jsonl` 记录父节点 key/objective/depth、候选数、展开前后查询数和成功/失败状态。
 - 新结果的 `config.json` 和 `summary.json` 使用 `format_version=2`，所有算法移除 final 字段并增加 expansion 信息；setup 格式仍为 1。旧结果不重写，读取结果的后续工具须按版本处理字段差异。

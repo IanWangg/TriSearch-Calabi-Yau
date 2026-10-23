@@ -10,7 +10,7 @@ set -euo pipefail
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${REPO_DIR}"
 
-PYTHON_BIN="${PYTHON_BIN:-/home/yiranwang/anaconda3/envs/sage/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 for arg in "$@"; do
   if [[ "${arg}" == "--help" || "${arg}" == "-h" ]]; then
     cat <<'HELP'
@@ -24,6 +24,7 @@ Defaults: two_face_deep_sets, 4D h11=15 data, max_kcup, 64 channels,
 Examples (after conda activate sage):
   bash train_cy_two_face_kcup.sh --gpu_index 0 --seed 0
   RUN_ID=two_face_seed_1 bash train_cy_two_face_kcup.sh --gpu_index 1 --seed 1
+  RUN_ID=two_face_dual bash train_cy_two_face_kcup.sh --two_face_encoder triangle_dual
 
 Caller arguments override the defaults. RUN_ID names the run under runs/;
 RUN_DIR sets its directory directly. PYTHON_BIN selects the interpreter.

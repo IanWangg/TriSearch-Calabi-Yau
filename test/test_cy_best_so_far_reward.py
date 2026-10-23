@@ -38,12 +38,13 @@ def reset_execution():
     configure_policy_execution()
 
 
-def context_policy():
+def context_policy(encoder="deep_sets"):
     torch.manual_seed(17)
     return build_subcomplex_agent(
         model_type="egnn", subcomplex_actor_type="two_face_deep_sets", in_channels=4,
         hidden_channels=8, out_channels=8, num_layers=2,
         training_reward_mode=BEST_SO_FAR_LOG_VOLUME, episode_horizon=128,
+        two_face_encoder=encoder,
     ).eval()
 
 
@@ -78,8 +79,9 @@ def test_mode_defaults_and_invalid_configurations():
             parse_args(flags + extra)
 
 
-def test_context_is_local_and_survives_batching_chunks_and_ppo():
-    state, model = square_state(dimension=4), context_policy()
+@pytest.mark.parametrize("encoder", ["deep_sets", "triangle_dual"])
+def test_context_is_local_and_survives_batching_chunks_and_ppo(encoder):
+    state, model = square_state(dimension=4), context_policy(encoder)
     contexts = [EpisodeContext(2, 2, 128), EpisodeContext(2, 8, 7), EpisodeContext(2, 4, 0)]
     states, actions = [state] * 3, [square_actions(state), square_actions(state), []]
     selection = batched_policy_action_selection(states, actions, model, device=DEVICE, episode_contexts=contexts)

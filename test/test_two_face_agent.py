@@ -11,10 +11,10 @@ from models.subcomplex_policy_factory import build_subcomplex_agent
 from test_cy_two_face_data import square_state, square_actions, real_representatives
 
 
-def two_face_policy(dimension=3):
+def two_face_policy(dimension=3, **kwargs):
     torch.manual_seed(17)
     return build_subcomplex_agent(model_type="egnn", subcomplex_actor_type="two_face_deep_sets",
-        in_channels=dimension, hidden_channels=8, out_channels=8, num_layers=2).eval()
+        in_channels=dimension, hidden_channels=8, out_channels=8, num_layers=2, **kwargs).eval()
 
 
 @pytest.mark.parametrize("dimension", [3, 4])
@@ -31,13 +31,14 @@ def test_encoding_does_not_require_triangle_adjacency(dimension):
     torch.testing.assert_close(model.get_value(batch), expected_value)
 
 
-def test_batch_independence_action_subsets_and_empty_forward():
+@pytest.mark.parametrize("encoder", ["deep_sets", "triangle_dual"])
+def test_batch_independence_action_subsets_and_empty_forward(encoder):
     state, small = square_state(), square_state(one_face=True)
     data = create_two_face_data_from_state(state, square_actions(state))
     subset = create_two_face_data_from_state(state, square_actions(state)[:1])
     empty = create_two_face_data_from_state(state)
     smaller = create_two_face_data_from_state(small, square_actions(small))
-    model = two_face_policy()
+    model = two_face_policy(two_face_encoder=encoder)
     single_value, single_logits = model.get_value_and_logits(Batch.from_data_list([data]))
     batch = Batch.from_data_list([data, empty, smaller, subset])
     values, logits = model.get_value_and_logits(batch)
@@ -58,10 +59,11 @@ def test_batch_independence_action_subsets_and_empty_forward():
     torch.testing.assert_close(model.get_value(no_actions), single_value.expand(2))
 
 
-def test_node_face_triangle_and_action_permutations():
+@pytest.mark.parametrize("encoder", ["deep_sets", "triangle_dual"])
+def test_node_face_triangle_and_action_permutations(encoder):
     state = square_state()
     original = create_two_face_data_from_state(state, square_actions(state))
-    model = two_face_policy()
+    model = two_face_policy(two_face_encoder=encoder)
     expected_value, expected_logits = model.get_value_and_logits(Batch.from_data_list([original]))
     data = original.clone()
     node_order = torch.tensor([6, 3, 1, 5, 0, 7, 4, 2])
@@ -87,20 +89,25 @@ def test_node_face_triangle_and_action_permutations():
     torch.testing.assert_close(logits, expected_logits.flip(1))
 
 
-def test_backwards_reaches_shared_encoder_and_both_heads():
+@pytest.mark.parametrize("encoder", ["deep_sets", "triangle_dual"])
+def test_backwards_reaches_shared_encoder_and_both_heads(encoder):
     state = square_state()
-    model = two_face_policy().train()
+    model = two_face_policy(two_face_encoder=encoder).train()
     batch = Batch.from_data_list([create_two_face_data_from_state(state, square_actions(state))])
     value, logits = model.get_value_and_logits(batch)
     (value.square().sum() + logits.square().sum()).backward()
-    for module in (model.point_egnn, model.triangle_mlp, model.face_mlp,
-                   model.rho, model.actor_mlp, model.value_mlp):
+    modules = [model.point_egnn, model.triangle_mlp, model.face_mlp,
+               model.rho, model.actor_mlp, model.value_mlp]
+    if encoder == "triangle_dual":
+        modules.append(model.triangle_dual)
+    for module in modules:
         grads = [parameter.grad for parameter in module.parameters() if parameter.grad is not None]
         assert grads and all(torch.isfinite(grad).all() for grad in grads)
         assert sum(float(grad.abs().sum()) for grad in grads) > 0
 
 
-def test_real_completion_values_and_aligned_logits(real_representatives):
+@pytest.mark.parametrize("encoder", ["deep_sets", "triangle_dual"])
+def test_real_completion_values_and_aligned_logits(real_representatives, encoder):
     from mdp.cy_geometry_worker import execute_geometry_request
     _, first, second = real_representatives
     actions = []
@@ -112,7 +119,7 @@ def test_real_completion_values_and_aligned_logits(real_representatives):
     actions[1] = tuple(reversed(actions[1]))
     batch = Batch.from_data_list([create_two_face_data_from_state(state, candidate)
                                  for state, candidate in zip((first, second), actions)])
-    model = two_face_policy(4)
+    model = two_face_policy(4, two_face_encoder=encoder)
     value, logits = model.get_value_and_logits(batch)
     torch.testing.assert_close(value[0], value[1])
     aligned = torch.tensor([actions[1].index(action) for action in actions[0]])

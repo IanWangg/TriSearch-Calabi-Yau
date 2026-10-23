@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 import signal
@@ -130,6 +131,7 @@ def main(args: argparse.Namespace) -> None:
 
 def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes, register_engine) -> None:
     from models.subcomplex_policy_factory import build_subcomplex_agent
+    from models.subcomplex_policy_config import resolve_two_face_encoder_options
     from core.cy_runtime_utils import build_checkpoint_dir
 
     torch_thread_config = configure_torch_cpu_threads(args)
@@ -268,6 +270,13 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
             dataset_coordinate_dim,
         ),
     )
+    encoder_options = dict(two_face_encoder=args.two_face_encoder,
+                           two_face_triangle_layers=args.two_face_triangle_layers)
+    if subcomplex_actor_type == "two_face_deep_sets":
+        config_path = Path(checkpoint_dir) / "model_config.json"
+        saved = json.loads(config_path.read_text()) if config_path.is_file() else None
+        encoder_options = resolve_two_face_encoder_options(
+            args.two_face_encoder, args.two_face_triangle_layers, saved_config=saved)
     policy = build_subcomplex_agent(
         model_type="egnn",
         in_channels=resolved_in_channels,
@@ -281,6 +290,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
         training_reward_mode=args.training_reward_mode,
         episode_horizon=args.rollout_length,
         device=str(device),
+        **encoder_options,
     ).to(device)
     print(f"Using policy in_channels={resolved_in_channels}")
     print(f"Using subcomplex_actor_type={subcomplex_actor_type}")

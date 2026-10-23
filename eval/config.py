@@ -58,6 +58,8 @@ class EvaluationSpec:
     ga_face_max_points: int = 12
     ga_face_samples: int = 1000
     two_face_state: bool = False
+    two_face_encoder: str | None = None
+    two_face_triangle_layers: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.two_face_state) is not bool:
@@ -120,9 +122,10 @@ class EvaluationSpec:
         if (set(self.algorithms) & value_search_names
                 and self.reward_function != "max_kcup"):
             raise ValueError("Metric-value search currently supports only max_kcup, using natural log volume.")
-        from models.subcomplex_policy_config import normalize_subcomplex_actor_type
+        from models.subcomplex_policy_config import validate_two_face_encoder_options
 
-        normalize_subcomplex_actor_type(self.subcomplex_actor_type)
+        validate_two_face_encoder_options(self.subcomplex_actor_type, self.two_face_encoder,
+                                         self.two_face_triangle_layers)
         if self.policy_observation_kind == "two_face" and (self.reward_function != "max_kcup" or self.in_channels != 4):
             raise ValueError("two_face_deep_sets evaluation requires 4D max_kcup data.")
         from reward_functions import infer_goal
