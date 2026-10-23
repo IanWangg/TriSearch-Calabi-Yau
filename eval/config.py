@@ -123,9 +123,17 @@ class EvaluationSpec:
         from models.subcomplex_policy_config import normalize_subcomplex_actor_type
 
         normalize_subcomplex_actor_type(self.subcomplex_actor_type)
+        if self.policy_observation_kind == "two_face" and (self.reward_function != "max_kcup" or self.in_channels != 4):
+            raise ValueError("two_face_deep_sets evaluation requires 4D max_kcup data.")
         from reward_functions import infer_goal
 
         infer_goal(self.reward_function)
+
+    @property
+    def policy_observation_kind(self) -> str:
+        from models.subcomplex_policy_config import observation_kind_for_subcomplex_actor
+
+        return observation_kind_for_subcomplex_actor(self.subcomplex_actor_type)
 
     @property
     def resolved_policy_proposal_count(self) -> int:

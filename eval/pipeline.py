@@ -117,6 +117,7 @@ def run_evaluation(
                     setup.rows, include_points_interior_to_facets=False,
                     neighbor_mode="two_neighbors", transition_pool=pool,
                     two_face_state=spec.two_face_state,
+                    include_two_face_metadata=(getattr(policy, "observation_kind", spec.policy_observation_kind) == "two_face"),
                 )
                 reward = get_reward(spec.reward_function)
                 objective = get_objective(spec.reward_function, reward=reward)

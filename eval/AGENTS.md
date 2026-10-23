@@ -139,7 +139,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 ### 搜索去重
 
 - `two_face_state=False` 为默认值，保持 full-FRST 身份与现有行为。开启时目前只支持 `max_kcup`；所有搜索 visited/discovered/reserved 身份与 objective 缓存使用各 ambient 2-face 的 canonical triangulation key。点标签与面集合由共享 geometry worker 提供，规范化复用 `mdp/cy_state_record.py`；不能将完整 simplices 的所有三点子集当作二维面表示。
-- 完整 FRST 与原始 `state.key` 仍用于几何定位、邻居展开和 actor/critic 输入；同类候选按现有提案/查询顺序保留首次成功查询代表与分数。Random/Greedy 与 GA 保留原重复查询计费。开关不参与 setup 校验，互异完整 FRST 起点允许属于同一二维面等价类，搜索历史仍逐起点独立。
+- 完整 FRST 与原始 `state.key` 仍用于几何定位和邻居展开；actor/critic 的 observation 由模型类型决定；同类候选按现有提案/查询顺序保留首次成功查询代表与分数。Random/Greedy 与 GA 保留原重复查询计费。开关不参与 setup 校验，互异完整 FRST 起点允许属于同一二维面等价类，搜索历史仍逐起点独立。
 - 开启时，v2 查询/转移事件追加 `evaluation_state_key`、`source_evaluation_state_key`、`best_evaluation_state_key`，展开事件追加父节点 `evaluation_state_key`，rollout 追加 `initial_evaluation_state_key` / `best_evaluation_state_key`。Population query 的 source 仍为 null。关闭时不追加这些结果字段。离线 metric 验证按二维面 key 检查同类 volume 的一致性，数值求解相对容差为 `1e-6`；保留完整 key 的几何追溯与起点配对检查。旧结果缺少开关视为 False；并行/合并结果必须采用相同设置。
 - BeFS/Beam 在单个 `(algorithm, polytope_index, start_index)` 内按 canonical state key 全局去重，在 objective 查询之前跳过已发现状态。
 - 起点立即标为已发现；候选首次成功查询后标为已发现。Beam 丢弃的候选仍属于已发现状态，不能在后续层重新加入。
@@ -149,6 +149,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 
 ### RL family
 
+- `two_face_deep_sets` 使用独立的面内 EGNN → triangle dual GNN → Deep Sets。网络只读取带 ambient 面归属的二维面 triangulations；collection 独立请求 face metadata，不自动开启 `two_face_state`。首版使用原始 4D 坐标与 `max_kcup`，新 checkpoint 必须带匹配的 `model_config.json` 并 strict load。critic-only 不枚举候选；零动作仍能计算 value。记录 `policy_observation_kind`、`policy_observation_schema_version` 和模型参数量，`state_representation` 仍仅描述搜索身份。
 - 默认使用 EGNN + `snn_simplex` actor/critic（输入 4 维、hidden/out channels 64、3 层）。checkpoint 默认来自 `runs/cy_snn_kcup_h11_15_20260921_123000_1584461/checkpoints/`，复用 latest 解析与严格加载；一个 evaluation 只加载一次模型。模型与设备参数均记录，不影响 setup。
 - `rl_stochastic_policy` 禁止重复访问。起点立即进入本起点的 `visited_state_keys`；屏蔽所有指向已访问状态的动作后，重新归一化剩余 policy 概率并采样。成功查询并移动后加入 visited。没有邻居时为 `no_neighbors`，邻居全部已访问时为 `no_unvisited_neighbors`；后一种情况记录零查询 expansion，不抽样、不移动。
 - `rl_policy_beam_search`：每父节点取最多 `beam_width=k` 个 policy 概率最高的未发现目标，全部查询 objective；按累计 `log π` 保留下一层 top k，不作长度归一化。
@@ -157,7 +158,7 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 - RL value beam / BeFS 的 metric 明确为绝对 volume 的自然对数，不减父节点 metric，不累计路径 reward。直接复用已经查询的 child objective，不能为 metric 再查询。非 `max_kcup` 输入必须明确报错。`rl_metric_value_*` 仅是对应算法的兼容别名，不代表另一种评分规则。
 - `RLAlgorithm.score_candidate` 接收已记录的父/子 objective；默认实现保留四参数 `score` 扩展兼容。两个 RL value 搜索均覆盖该入口使用绝对 metric，不调用 transition reward。
 - 仅包含 RL value 搜索（含兼容别名）的运行允许 `value_discount` 为任意非负有限系数（包括大于 1）；默认值为 0.9。其他运行保留 `[0,1]` 限制。大于 1 的 sweep 与已有 baseline 使用独立 run，通过共享 setup 配对比较。
-- `policy_proposal_count` 影响 value beam 和 value BeFS，允许正整数或 `-1`。省略时 value beam 随 `beam_width`，value BeFS 默认 **4**；BeFS 可显式传入其他正整数，且不受 `beam_width` 影响。`-1` 使用全部未发现邻居，完全跳过 actor logits。critic 使用 SNN simplex 特征，不能因为跳过 actor 而改用另一种 value 特征。
+- `policy_proposal_count` 影响 value beam 和 value BeFS，允许正整数或 `-1`。省略时 value beam 随 `beam_width`，value BeFS 默认 **4**；BeFS 可显式传入其他正整数，且不受 `beam_width` 影响。`-1` 使用全部未发现邻居，完全跳过 actor logits。critic 使用所选模型的状态特征（SNN simplex 或 two-face Deep Sets），不能因为跳过 actor 而改用另一种 value 特征。
 - value BeFS 在提案前排除本起点已发现状态和重复目标；未通过 policy 筛选的目标不标为已发现。首次成功查询后永久标为已发现，再次遇到时不查询、不更新首次分数。提案并列和查询顺序与 RL beam 一致；不得把绝对 metric + value 分数改为累计路径 reward。
 - Beam 提案先排除已发现目标与重复目标，概率并列按 canonical action 顺序；选择完提案后按 canonical 顺序查询。累计概率使用完整合法动作集合的分布，不能在搜索去重后重新归一化。父节点与下一层按 beam 分数降序、首次发现顺序排序；丢弃的已查询候选仍永久属于已发现状态。
 - stochastic 每次移动查询 1 次。policy beam 每父节点最多 k 次，最后一个父节点最多超出 k−1 次；value beam 在有限 m 时每父节点最多 m 次、完整一层最多 k×m 次，最后一个父节点最多超出 m−1 次。`m=-1` 没有这个固定上界。两个 RL beam 的 `transition_count=0`。

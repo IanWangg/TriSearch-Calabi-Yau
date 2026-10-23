@@ -9,7 +9,9 @@ import torch
 from mdp.cy_state_record import NEIGHBOR_MODES
 from models.subcomplex_policy_config import (
     DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
+    SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
     normalize_subcomplex_actor_type,
+    observation_kind_for_subcomplex_actor,
     value_feature_source_for_subcomplex_actor,
 )
 from reward_functions import CY_VOLUME_REWARD_TRANSFORMS, SUPPORTED_REWARDS
@@ -87,6 +89,10 @@ class CYTrainingConfig:
     report_every: int
     dry_run: bool
     dry_run_row_limit: int
+
+    @property
+    def observation_kind(self) -> str:
+        return observation_kind_for_subcomplex_actor(self.subcomplex_actor_type)
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> "CYTrainingConfig":
@@ -217,7 +223,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--subcomplex_actor_type",
         type=str,
         default=DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
-        choices=["mlp", "gnn", "circuit_pool", "snn_simplex", "default"],
+        choices=SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
         help="Subcomplex actor architecture.",
     )
     parser.add_argument(
@@ -466,6 +472,17 @@ def validate_count_bonus_args(args: argparse.Namespace) -> None:
         raise ValueError(
             f"count_bonus_exponent must be > 0, got {count_bonus_exponent}."
         )
+
+
+def validate_two_face_training_args(args: argparse.Namespace) -> None:
+    if observation_kind_for_subcomplex_actor(args.subcomplex_actor_type) != "two_face":
+        return
+    if args.neighbor_mode != "two_neighbors" or args.include_points_interior_to_facets:
+        raise ValueError("two_face_deep_sets training requires two_neighbors without facet-interior points.")
+    if args.reward_function != "max_kcup" or args.in_channels not in (None, 4):
+        raise ValueError("two_face_deep_sets training requires 4D max_kcup data.")
+    if args.vertex_aug_enable or args.count_bonus_coef != 0:
+        raise ValueError("two_face_deep_sets v1 requires augmentation disabled and count_bonus_coef=0.")
 
 
 def validate_neighbor_mode_args(args: argparse.Namespace) -> None:

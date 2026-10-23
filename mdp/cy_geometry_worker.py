@@ -152,7 +152,8 @@ def _build_collection(request):
         include_points_interior_to_facets=interior,
         two_face_labels=(tuple(sorted(tuple(sorted(int(label) for label in face.labels))
                                       for face in polytope.faces(2)))
-                         if request.get("two_face_state", False) else ()),
+                         if (request.get("two_face_state", False)
+                             or request.get("include_two_face_metadata", False)) else ()),
     )
     _register_configuration(configuration)
     states = {}

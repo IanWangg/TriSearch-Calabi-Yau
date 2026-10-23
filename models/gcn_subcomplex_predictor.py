@@ -52,6 +52,8 @@ class GCNSubcomplexAgent(nn.Module):
         self.subcomplex_actor_type = self._normalize_subcomplex_actor_type(
             subcomplex_actor_type
         )
+        if self.subcomplex_actor_type == "two_face_deep_sets":
+            raise ValueError("Use build_subcomplex_agent to construct the two_face_deep_sets policy.")
         self.value_feature_source = value_feature_source_for_subcomplex_actor(
             self.subcomplex_actor_type
         )

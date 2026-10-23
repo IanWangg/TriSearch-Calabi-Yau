@@ -343,13 +343,14 @@ def build_cy_rollout_collection(
     neighbor_mode: str = "regular",
     transition_pool: Any = None,
     two_face_state: bool = False,
+    include_two_face_metadata: bool = False,
 ) -> CYRolloutCollection:
     mode = _normalize_neighbor_mode(neighbor_mode)
     if mode == "two_neighbors" and include_points_interior_to_facets:
         raise ValueError("neighbor_mode='two_neighbors' requires include_points_interior_to_facets=False.")
     if Polytope is not None:
-        if two_face_state:
-            raise ValueError("two_face_state requires managed geometry workers.")
+        if two_face_state or include_two_face_metadata:
+            raise ValueError("two_face_state / include_two_face_metadata requires managed geometry workers.")
         return _build_cy_rollout_collection_inline(rows, include_points_interior_to_facets=include_points_interior_to_facets, neighbor_mode=mode)
     owned = transition_pool is None
     pool = transition_pool or create_transition_pool(num_workers=1)
@@ -357,7 +358,8 @@ def build_cy_rollout_collection(
     try:
         requests = ({"operation": "build_collection", "row": row,
                      "include_points_interior_to_facets": include_points_interior_to_facets,
-                     "neighbor_mode": mode, "two_face_state": two_face_state} for row in rows)
+                     "neighbor_mode": mode, "two_face_state": two_face_state,
+                     "include_two_face_metadata": include_two_face_metadata} for row in rows)
         for result in pool.imap(execute_geometry_request, requests):
             configuration = result["configuration"]
             if configuration.index in configurations and configurations[configuration.index] != configuration:

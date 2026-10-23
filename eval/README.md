@@ -19,7 +19,8 @@ existing repeated-query charging rules. Search history remains per start even
 when two distinct supplied starts represent the same 2-face class.
 
 Full FRSTs and their original keys remain available to the geometry engine and
-actor/critic; network features and checkpoint loading are unchanged. KCUP still
+the selected policy adapter. The default SNN policy uses full triangulations;
+`two_face_deep_sets` builds face-only observations independently of this switch. KCUP still
 uses the existing solver on a full representative. Engine and worker objective
 caches use the 2-face key, including duplicate requests within a physical batch.
 Cache hits still count as logical queries; disabling caches also disables this
@@ -34,6 +35,30 @@ Offline readers validate 2-face identities and matching class metrics (relative
 tolerance `1e-6` for numerical solves), including across combined runs. They allow
 distinct full-FRST starts in the same class and reject mixed representation
 settings. Historical runs without the option are interpreted as `false`.
+
+## Two_face_deep_sets policy
+
+Select `--subcomplex_actor_type two_face_deep_sets` and provide a newly trained
+checkpoint with its adjacent `model_config.json`. Architecture and observation
+schema must match exactly. Historical SNN checkpoints remain usable without a
+sidecar. New models are trained from scratch; loading weights does not resume
+optimizer or iteration state.
+
+The shared face-local EGNN and triangle dual GNN encode every ambient 2-face,
+including faces without actions. Deep Sets conditions the local flip actor and
+the state-only critic. The network never receives full-FRST edges or simplices.
+Value-only inference does not enumerate outgoing actions. Raw ambient coordinates
+are used in v1; augmentation and count bonuses are disabled in its training entry.
+The model supports separate 3D/4D instances; CY training/evaluation uses 4D
+`max_kcup`. Completion invariance does not imply rotation or lattice-basis invariance.
+
+`policy.policy_observation_kind`, `policy.policy_observation_schema_version` and
+`policy.model_parameter_count` describe network inputs and size. The existing
+`state_representation` continues to describe search identity only. Use the same
+explicit `--two_face_state` setting for both models in a comparison.
+
+See [the model comparison study](sweep/two_face_model/README.md) for training,
+held-out input preparation and paired evaluation commands.
 
 ## Directory organization
 

@@ -10,6 +10,7 @@ import torch_geometric as pyg
 from torch_geometric.data import Batch, Data
 
 from core.cy_bounded_cache import BoundedLRU
+from core.cy_two_face_data import TWO_FACE_ACTION_CACHE, TWO_FACE_TOPOLOGY_CACHE
 
 if TYPE_CHECKING:
     from mdp.cy_triangulation_state import CYTriangulationState
@@ -56,6 +57,8 @@ def _cy_tensor_caches():
         "simplex_topology": _CY_SIMPLEX_TOPOLOGY_CACHE,
         "snn_simplex_topology": _CY_SNN_SIMPLEX_TOPOLOGY_CACHE,
         "vertices": _CY_VERTEX_TENSOR_CACHE,
+        "two_face_topology": TWO_FACE_TOPOLOGY_CACHE,
+        "two_face_actions": TWO_FACE_ACTION_CACHE,
     }
 
 
@@ -72,6 +75,9 @@ def configure_cy_data_tensor_caches(*, max_bytes: int = _DEFAULT_TENSOR_CACHE_BY
 
 def get_cy_data_tensor_cache_stats() -> Dict[str, Dict[str, int]]:
     return {name: cache.stats() for name, cache in _cy_tensor_caches().items()}
+
+
+configure_cy_data_tensor_caches()
 
 
 def _get_cached_vertices(state: CYTriangulationState) -> torch.Tensor:
@@ -219,6 +225,8 @@ def prune_cy_data_tensor_caches(
     keep_key_set = None if keep_keys is None else {str(key) for key in keep_keys}
 
     if keep_key_set is not None:
+        # Two-face cache identities contain restrictions, not representative keys.
+        # They are evicted by the shared byte/entry budget, never by full-key pruning.
         for key in list(_CY_GRAPH_TENSOR_CACHE.keys()):
             if key[0] not in keep_key_set:
                 _CY_GRAPH_TENSOR_CACHE.pop(key, None)
