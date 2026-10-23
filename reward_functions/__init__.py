@@ -8,6 +8,7 @@ from reward_functions.max_tri import MaxTriangulationReward
 from reward_functions.max_cy_volume import MaxCYVolumeReward
 from reward_functions.max_kcup import MaxKcupReward
 from reward_functions.max_toric_cy_volume import MaxToricCYVolumeReward
+from reward_functions.min_mori_cap import MinMoriCapReward
 
 Goal = Literal["min", "max"]
 SUPPORTED_REWARDS = (
@@ -16,6 +17,7 @@ SUPPORTED_REWARDS = (
     "max_cy_volume",
     "max_kcup",
     "max_toric_cy_volume",
+    "min_mori_cap",
 )
 CY_VOLUME_REWARD_TRANSFORMS = MaxCYVolumeReward.supported_transforms
 
@@ -51,6 +53,8 @@ def get_reward(name: str, *, cy_volume_reward_transform: str = "raw") -> Reward:
         return MaxKcupReward()
     if normalized == "max_toric_cy_volume":
         return MaxToricCYVolumeReward()
+    if normalized == "min_mori_cap":
+        return MinMoriCapReward()
     raise AssertionError(f"Unhandled reward function '{normalized}'.")
 
 
@@ -80,6 +84,11 @@ def get_objective(name: str, *, reward: Reward | None = None) -> Callable:
                 "MaxToricCYVolumeReward instance."
             )
         return volume_reward.metric
+    if normalized == "min_mori_cap":
+        mori_reward = reward if reward is not None else MinMoriCapReward()
+        if not isinstance(mori_reward, MinMoriCapReward):
+            raise TypeError("min_mori_cap objective requires a MinMoriCapReward instance.")
+        return mori_reward.metric
     raise AssertionError(f"Unhandled objective '{normalized}'.")
 
 

@@ -320,6 +320,12 @@ python scripts/train_cy.py \
 Unlike `max_cy_volume`, this exact `cyopt` objective can vary between complete
 FRST representatives with the same 2-face restrictions.
 
+Use `--reward min_mori_cap` to minimize
+`float(len(cy.mori_cone_cap(in_basis=True).extremal_rays()))`.
+The reported objective is the raw extremal-ray count, and the transition reward
+is the current count minus the next count, so reducing the count gives positive
+reward. This objective uses complete triangulation states.
+
 ## Training Logs
 
 Training reports one cumulative return summary after each complete rollout:

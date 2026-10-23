@@ -242,7 +242,7 @@ def test_worker_geometry_objectives_match_existing_reward_classes():
     configuration = result["configuration"]
     triangulation = _triangulate(_get_polytope(configuration), configuration, record.simplices)
     state = SimpleNamespace(key=record.key, simplices=record.simplices, cy_triangulation=triangulation)
-    for name in ("max_cy_volume", "max_kcup", "max_toric_cy_volume"):
+    for name in ("max_cy_volume", "max_kcup", "max_toric_cy_volume", "min_mori_cap"):
         expected = get_objective(name)(state)
         actual = execute_geometry_request({"operation": "objective", "state": record.to_payload(),
                                            "configuration": configuration, "reward_name": name})
