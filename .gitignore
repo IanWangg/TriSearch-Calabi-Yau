@@ -41,3 +41,9 @@ ckpt/runs/
 !/eval/sweep/two_face_model/README.md
 !/eval/sweep/two_face_model/configs/
 !/eval/sweep/two_face_model/scripts/
+
+# Offline trajectory analysis sources; derived graphs and figures remain ignored.
+!/eval/sweep/two_face_trajectory_analysis_20261018/
+/eval/sweep/two_face_trajectory_analysis_20261018/*
+!/eval/sweep/two_face_trajectory_analysis_20261018/README.md
+!/eval/sweep/two_face_trajectory_analysis_20261018/scripts/
