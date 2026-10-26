@@ -8,7 +8,11 @@ import numpy as np
 import torch
 
 from core.cy_policy_inference import rollout_step_with_policy, query_objective_values
-from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME, STEP_LOG_VOLUME, EpisodeContext, best_so_far_reward
+from core.cy_episode_context import (
+    BEST_SO_FAR, BEST_SO_FAR_LOG_VOLUME, FINITE_EPISODE_MODES, INCREMENTAL,
+    STEP_LOG_VOLUME, TRAINING_REWARD_MODES, EpisodeContext,
+    MinimizationEpisodeContext, best_so_far_reward, best_so_far_min_reward,
+)
 from core.cy_ppo import PPORolloutBuffer
 from core.cy_runtime_utils import increment_visitation
 from core.training_types import FirstEpisodeTracker, PolicyRolloutSummary
@@ -34,7 +38,7 @@ def format_rollout_summary(
         f"discounted_reward={summary.discounted_reward:.4f}",
         f"success_rate={summary.success_rate:.4f}",
     ]
-    if abs(float(summary.intrinsic_bonus_mean)) > 0.0 or summary.training_reward_mode == BEST_SO_FAR_LOG_VOLUME:
+    if abs(float(summary.intrinsic_bonus_mean)) > 0.0 or summary.training_reward_mode in FINITE_EPISODE_MODES:
         parts.extend(
             [
                 f"training_return={summary.training_return_mean:.4f}",
@@ -42,7 +46,7 @@ def format_rollout_summary(
                 f"intrinsic_bonus_mean={summary.intrinsic_bonus_mean:.4f}",
             ]
         )
-    if summary.training_reward_mode == BEST_SO_FAR_LOG_VOLUME:
+    if summary.training_reward_mode in FINITE_EPISODE_MODES:
         parts.append(f"training_reward_mode={summary.training_reward_mode}")
         parts.append(f"episode_length_mean={np.mean(summary.episode_lengths):.2f}")
         parts.append(f"objective_query_sec={summary.objective_query_sec:.2f}")
@@ -215,14 +219,20 @@ def collect_policy_rollout(
     objective_goal: str | None = None,
     training_reward_mode: str = STEP_LOG_VOLUME,
 ) -> PolicyRolloutSummary:
-    finite_episode = training_reward_mode == BEST_SO_FAR_LOG_VOLUME
-    if training_reward_mode not in (STEP_LOG_VOLUME, BEST_SO_FAR_LOG_VOLUME):
+    finite_episode = training_reward_mode in FINITE_EPISODE_MODES
+    if training_reward_mode not in TRAINING_REWARD_MODES:
         raise ValueError("Unsupported training_reward_mode.")
     if finite_episode:
-        if gamma != 1.0 or rollout_length <= 0 or count_bonus_coef != 0 or vertex_aug_enable:
-            raise ValueError("best_so_far_log_volume requires gamma=1, positive horizon, no bonus or augmentation.")
+        if gamma != 1.0 or rollout_length <= 0 or vertex_aug_enable:
+            raise ValueError("Best-so-far rewards require gamma=1, positive horizon and no augmentation.")
+    if training_reward_mode == BEST_SO_FAR_LOG_VOLUME:
+        if count_bonus_coef != 0:
+            raise ValueError("best_so_far_log_volume requires no count bonus.")
         if objective_function is None or objective_name != "max_kcup" or objective_goal != "max":
             raise ValueError("best_so_far_log_volume requires the max_kcup objective.")
+    if training_reward_mode == BEST_SO_FAR:
+        if objective_function is None or objective_name != "min_mori_cap" or objective_goal != "min":
+            raise ValueError("best_so_far requires the min_mori_cap minimization objective.")
     if bool(getattr(policy, "requires_episode_context", False)) != finite_episode:
         raise ValueError("Policy context and training_reward_mode do not match.")
     states = engine.sample_initial_states(num_envs, rng=rng, initial_state_pool=initial_state_pool)
@@ -245,6 +255,7 @@ def collect_policy_rollout(
         list(objective_initial_values) if objective_initial_values is not None else None
     )
     objective_first_episode_active = [True for _ in states]
+    current_objective_values = list(objective_initial_values) if objective_initial_values is not None else None
     trajectory_transforms = None
     if bool(vertex_aug_enable):
         trajectory_transforms = sample_cy_trajectory_transforms(
@@ -285,13 +296,18 @@ def collect_policy_rollout(
             break
         step_options = {}
         if finite_episode:
+            context_type = MinimizationEpisodeContext if training_reward_mode == BEST_SO_FAR else EpisodeContext
             step_options = dict(
-                episode_contexts=[EpisodeContext(current, best, int(rollout_length) - step_index if enabled else 0)
+                episode_contexts=[context_type(current, best, int(rollout_length) - step_index if enabled else 0)
                                   for current, best, enabled in zip(objective_final_values, objective_best_values, active)],
                 active_mask=active, reset_on_done=False, objective_function=objective_function,
                 batch_objective_function=batch_objective_function,
                 current_objective_values=objective_final_values,
             )
+        elif training_reward_mode == INCREMENTAL and objective_function is not None:
+            step_options = dict(objective_function=objective_function,
+                                batch_objective_function=batch_objective_function,
+                                current_objective_values=current_objective_values)
         pool = transition_pool or getattr(engine, "transition_pool", None)
         if pool is not None and hasattr(pool, "check_memory"):
             pool.check_memory()
@@ -329,11 +345,15 @@ def collect_policy_rollout(
         ]
         if finite_episode:
             training_rewards = [0.0] * len(states)
+            reward_from_best = best_so_far_min_reward if training_reward_mode == BEST_SO_FAR else best_so_far_reward
             for idx, enabled in enumerate(active):
                 if not enabled:
                     continue
                 objective_value = step_result.objective_values[idx]
-                best, training_rewards[idx] = best_so_far_reward(objective_best_values[idx], objective_value)
+                best, improvement = reward_from_best(objective_best_values[idx], objective_value)
+                training_rewards[idx] = improvement + intrinsic_bonus[idx]
+                if training_reward_mode == BEST_SO_FAR:
+                    step_result.rewards[idx] = improvement
                 objective_final_values[idx], objective_best_values[idx] = objective_value, best
                 episode_lengths[idx] += 1
                 if step_index + 1 == int(rollout_length) and not step_result.dones[idx]:
@@ -351,7 +371,8 @@ def collect_policy_rollout(
             for idx, transitioned_state in enumerate(step_result.transitioned_states):
                 if not objective_first_episode_active[idx]:
                     continue
-                objective_value = float(objective_function(transitioned_state))
+                objective_value = (step_result.objective_values[idx] if getattr(step_result, "objective_values", None) is not None
+                                   else float(objective_function(transitioned_state)))
                 objective_final_values[idx] = objective_value
                 if objective_goal == "min":
                     objective_best_values[idx] = min(
@@ -363,6 +384,9 @@ def collect_policy_rollout(
                     )
                 if step_result.dones[idx]:
                     objective_first_episode_active[idx] = False
+            if training_reward_mode == INCREMENTAL:
+                current_objective_values = query_objective_values(
+                    step_result.next_states, objective_function, batch_objective_function)
         total_intrinsic_bonus += float(sum(intrinsic_bonus))
         total_intrinsic_bonus_count += len(intrinsic_bonus)
 

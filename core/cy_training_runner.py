@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Sequence
 import torch
 import numpy as np
 
-from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME
+from core.cy_episode_context import FINITE_EPISODE_MODES, INCREMENTAL
 from core.cy_policy_inference import PolicyValueResult
 from core.cy_checkpointing import (
     find_latest_policy_checkpoint,
@@ -156,6 +156,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
         get_reward(
             args.reward_function,
             cy_volume_reward_transform=args.cy_volume_reward_transform,
+            mori_cap_backend=args.mori_cap_backend,
         )
         if args.reward_function is not None
         else None
@@ -176,6 +177,8 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
             f"goal={objective_goal} "
             f"cy_volume_reward_transform={args.cy_volume_reward_transform}"
         )
+        if args.reward_function == "min_mori_cap":
+            print(f"Using Mori cap backend: {args.mori_cap_backend}")
 
     device = resolve_training_device(gpu_index=args.gpu_index, force_cpu=bool(args.force_cpu))
     if device.type == "cuda":
@@ -419,7 +422,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                 objective_function=objective_function,
                 batch_objective_function=(
                     lambda states: train_engine.objective_values(states, args.reward_function)
-                ) if args.training_reward_mode == BEST_SO_FAR_LOG_VOLUME else None,
+                ) if args.training_reward_mode in (*FINITE_EPISODE_MODES, INCREMENTAL) else None,
                 objective_name=args.reward_function,
                 objective_goal=objective_goal,
                 training_reward_mode=args.training_reward_mode,
@@ -436,7 +439,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
 
             bootstrap_start = time.perf_counter()
             bootstrap_expand_summary = None
-            if args.training_reward_mode == BEST_SO_FAR_LOG_VOLUME:
+            if args.training_reward_mode in FINITE_EPISODE_MODES:
                 bootstrap_value_result = PolicyValueResult(
                     value_tensor=torch.zeros(len(rollout_summary.final_states), device=device),
                     data_build_sec=0.0, batch_transfer_sec=0.0, inference_sec=0.0,
@@ -519,7 +522,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                     objective_function=objective_function,
                     batch_objective_function=(
                         lambda states: eval_engine.objective_values(states, args.reward_function)
-                    ) if args.training_reward_mode == BEST_SO_FAR_LOG_VOLUME else None,
+                    ) if args.training_reward_mode in (*FINITE_EPISODE_MODES, INCREMENTAL) else None,
                     objective_name=args.reward_function,
                     objective_goal=objective_goal,
                     training_reward_mode=args.training_reward_mode,
@@ -611,6 +614,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                     iteration=iteration,
                     reward_function=args.reward_function,
                     cy_volume_reward_transform=args.cy_volume_reward_transform,
+                    mori_cap_backend=args.mori_cap_backend,
                     rollout_summary=rollout_summary,
                     eval_summary=eval_summary,
                     train_stats=train_stats,

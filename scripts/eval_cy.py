@@ -56,9 +56,11 @@ def parse_args(argv=None):
                        help="Synchronize CUDA for detailed policy timings (slower).")
     timing.add_argument("--no_profile_cuda_timing", dest="profile_cuda_timing", action="store_false")
     parser.set_defaults(force_cpu=False, profile_cuda_timing=False)
-    from reward_functions import SUPPORTED_REWARDS
+    from reward_functions import MORI_CAP_BACKENDS, SUPPORTED_REWARDS
 
     parser.add_argument("--reward_function", choices=SUPPORTED_REWARDS, default="max_kcup")
+    parser.add_argument("--mori_cap_backend", choices=MORI_CAP_BACKENDS, default="cytools",
+                        help="Extremal-ray backend for min_mori_cap; recorded in the run specification.")
     representation = parser.add_mutually_exclusive_group()
     representation.add_argument("--two_face_state", action="store_true",
                                 help="Use 2-face equivalence for search deduplication and max_kcup caching/validation; keep full FRSTs for geometry; network observation is selected by subcomplex_actor_type.")

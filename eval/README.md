@@ -347,6 +347,11 @@ combined allowance of `1 GiB`. `--num_vertices`, `--favorable` and
 `--non_favorable` are optional selection filters; by default neither favorability
 class is excluded. Use `--no_cache_states` to disable runtime caching.
 
+For `min_mori_cap`, `--mori_cap_backend mosek` selects the shared training
+implementation with reusable, single-thread simplex LPs. The default is
+`cytools`; the backend is saved in the run specification and does not affect
+setup identity or logical query accounting. Objective caches separate backends.
+
 To compare all four baselines, with a beam width of 4:
 
 ```bash

@@ -82,6 +82,24 @@ def test_real_kcup_pipeline_cache_equivalence_shared_starts_and_algorithm_order(
                 assert list(filter(matches, first)) == list(filter(matches, second))
 
 
+def test_real_mori_cap_backends_preserve_trajectories_queries_and_cache_semantics(tmp_path, real_setup):
+    spec, setup = real_setup
+    spec = replace(spec, reward_function="min_mori_cap", algorithms=("random", "greedy"))
+    reference = run_evaluation(spec, setup, output_dir=tmp_path / "cytools")
+    for cached in (True, False):
+        changed = replace(spec, mori_cap_backend="mosek", cache_states=cached)
+        result = run_evaluation(changed, load_eval_setup(setup.path),
+                                output_dir=tmp_path / ("mosek_cached" if cached else "mosek_uncached"))
+        assert [asdict(row) for row in result.rollouts] == [asdict(row) for row in reference.rollouts]
+        for filename in ("queries.jsonl", "expansions.jsonl", "transitions.jsonl"):
+            assert read_jsonl(result.output_dir / filename) == read_jsonl(reference.output_dir / filename)
+        config = json.loads((result.output_dir / "config.json").read_text())
+        assert config["spec"]["mori_cap_backend"] == "mosek"
+        summary = json.loads((result.output_dir / "summary.json").read_text())
+        if not cached:
+            assert all(stats["objective_cache_bytes"] == 0 for stats in summary["runtime_stats"].values())
+
+
 def test_pipeline_preserves_partial_results_and_closes_runtime_on_failure(monkeypatch, tmp_path, real_setup):
     import eval.pipeline as pipeline
 

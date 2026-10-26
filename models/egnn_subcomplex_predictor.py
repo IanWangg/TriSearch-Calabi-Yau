@@ -8,6 +8,7 @@ from .act_resolver import activation_resolver
 from .egnn import EGNN
 from .egnn_encoder import EGNNEncoder
 from .snn_simplex_actor import SNNSimplexActor
+from core.cy_episode_context import BEST_SO_FAR, STEP_LOG_VOLUME, OBJECTIVE_CONTEXT_FIELDS
 from .subcomplex_policy_config import (
     DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
     SUBCOMPLEX_ACTOR_TYPE_ALIASES,
@@ -291,6 +292,8 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         act="silu",
         subcomplex_actor_type=DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
         device="cpu",
+        training_reward_mode=STEP_LOG_VOLUME,
+        episode_horizon=None,
     ):
         super(EGNNSubcomplexAgent, self).__init__(
             in_channels=in_channels,
@@ -309,6 +312,29 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
         if self.subcomplex_actor_type == "two_face_deep_sets":
             raise ValueError("Use build_subcomplex_agent to construct the two_face_deep_sets policy.")
         self.value_feature_source = self._value_feature_source_for_actor(self.subcomplex_actor_type)
+        self.training_reward_mode = training_reward_mode
+        self.requires_episode_context = training_reward_mode == BEST_SO_FAR
+        if training_reward_mode not in (STEP_LOG_VOLUME, BEST_SO_FAR):
+            raise ValueError("Unsupported SNN training_reward_mode.")
+        if self.requires_episode_context:
+            if self.subcomplex_actor_type != "snn_simplex" or type(episode_horizon) is not int or episode_horizon <= 0:
+                raise ValueError("best_so_far requires snn_simplex with a positive episode_horizon.")
+            self.observation_kind = "full_triangulation"
+            self.observation_schema_version = 2
+            self.context_mlp = nn.Sequential(
+                nn.Linear(out_channels + len(OBJECTIVE_CONTEXT_FIELDS), hidden_channels),
+                activation_resolver(act),
+                nn.Linear(hidden_channels, out_channels),
+            )
+            self.model_config = dict(
+                model_type="egnn", subcomplex_actor_type=self.subcomplex_actor_type,
+                observation_kind=self.observation_kind, observation_schema_version=2,
+                in_channels=in_channels, out_channels=out_channels, hidden_channels=hidden_channels,
+                num_layers=num_layers, subcomplex_decoder_num_layers=subcomplex_decoder_num_layers,
+                share_encoder=share_encoder, activation=act, training_reward_mode=training_reward_mode,
+                episode_horizon=episode_horizon, episode_context_fields=list(OBJECTIVE_CONTEXT_FIELDS),
+                critic_target="expected_remaining_best_objective_decrease_plus_count_bonus", gamma=1.0,
+            )
         if self.subcomplex_actor_type == "snn_simplex":
             self.snn_simplex_actor = SNNSimplexActor(
                 channels=out_channels,
@@ -340,6 +366,18 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
     @staticmethod
     def _value_feature_source_for_actor(subcomplex_actor_type: str) -> str:
         return value_feature_source_for_subcomplex_actor(subcomplex_actor_type)
+
+    def _condition_episode_features(self, features, batch, graph_indices=None):
+        if not self.requires_episode_context:
+            return features
+        context = getattr(batch, "episode_context", None)
+        if context is None or context.shape != (batch.num_graphs, len(OBJECTIVE_CONTEXT_FIELDS)):
+            raise ValueError("Context policy requires one episode_context row per state.")
+        if not torch.isfinite(context).all():
+            raise ValueError("episode_context must be finite.")
+        if graph_indices is not None:
+            context = context[graph_indices]
+        return self.context_mlp(torch.cat((features, context.to(features)), dim=-1))
 
     def _extract_batched_subcomplex_data(self, batch, device):
         if not hasattr(batch, "subcomplex_vertices"):
@@ -599,6 +637,7 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
                 simplex_graph_index,
                 size=int(num_available_subcomplexes.numel()),
             )
+            subcomplex_features = self._condition_episode_features(subcomplex_features, batch, _candidate_graph_index)
             logits_flat = self.subcomplex_decoder_head(subcomplex_features).squeeze(-1)
         else:
             subcomplex_features, candidate_graph_index = self._pool_batched_subcomplex_embeddings(
@@ -615,7 +654,7 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
                     dim=-1,
                 )
             logits_flat = self.subcomplex_head(policy_features).squeeze(-1)
-        value = self.value_head(value_feature)
+        value = self.value_head(self._condition_episode_features(value_feature, batch))
         logits_padded = self._build_padded_logits(logits_flat, num_available_subcomplexes)
         return value.squeeze(-1), logits_padded
 
@@ -666,7 +705,7 @@ class EGNNSubcomplexAgent(EGNNSubcomplexPredictor):
                 node_embeddings=embeddings, node_ptr=batch.ptr, batch=batch,
             )
             global_feature = gnn.pool.global_max_pool(features, graph_indices, size=batch.num_graphs)
-            return self.value_head(global_feature).squeeze(-1)
+            return self.value_head(self._condition_episode_features(global_feature, batch)).squeeze(-1)
 
         global_feature = gnn.pool.global_max_pool(z_remove_before_proj, batch.batch)
         if not self.share_encoder:

@@ -119,6 +119,8 @@ def validate_policy_observations(data_list, policy):
             raise ValueError("PPO/inference observation schema does not match the policy.")
         if expected == "two_face" and data.observation_schema_version != policy.observation_schema_version:
             raise ValueError("Unsupported two_face observation schema version.")
+        if bool(getattr(policy, "requires_episode_context", False)) != (getattr(data, "episode_context", None) is not None):
+            raise ValueError("Episode context observation schema does not match the policy.")
 
 
 def _policy_uses_simplex_topology(policy: Any) -> bool:
@@ -175,8 +177,6 @@ def build_cy_data_list(
             data_list = [TwoFaceContextData(**data.to_dict(), episode_context=torch.tensor(
                 [context.features()], dtype=torch.float32)) for data, context in zip(data_list, episode_contexts)]
         return data_list
-    if episode_contexts is not None:
-        raise ValueError("Episode context requires two_face observations.")
     if observation_kind != "full_triangulation":
         raise ValueError(f"Unknown observation_kind {observation_kind!r}.")
 
@@ -192,6 +192,10 @@ def build_cy_data_list(
         )
         for state, actions in zip(states, action_lists)
     ]
+    if episode_contexts is not None:
+        for data, context in zip(data_list, episode_contexts):
+            data.episode_context = torch.tensor([context.features()], dtype=torch.float32)
+            data.observation_schema_version = 2
     if trajectory_transforms is None:
         return data_list
 

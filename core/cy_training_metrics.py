@@ -104,6 +104,13 @@ def _rollout_iteration_metrics_payload(
         payload["episode_terminal_reasons"] = summary.episode_terminal_reasons
     if summary.objective_name in {"max_cy_volume", "max_kcup"}:
         payload["raw_volume"] = build_raw_volume_metrics(summary)
+    if summary.objective_name == "min_mori_cap":
+        payload["objective"] = dict(
+            name=summary.objective_name, goal=summary.objective_goal,
+            initial_values=summary.objective_initial_values,
+            final_values=summary.objective_final_values,
+            best_values=summary.objective_best_values,
+        )
     return payload
 
 
@@ -123,12 +130,14 @@ def build_iteration_metrics_record(
     train_sec: float,
     eval_sec: float,
     iteration_sec: float,
+    mori_cap_backend: str = "cytools",
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "iteration": int(iteration) + 1,
         "reward_function": reward_function,
         "cy_volume_reward_transform": str(cy_volume_reward_transform),
+        "mori_cap_backend": str(mori_cap_backend),
         "train": _rollout_iteration_metrics_payload(
             rollout_summary,
             deterministic=deterministic_rollout,

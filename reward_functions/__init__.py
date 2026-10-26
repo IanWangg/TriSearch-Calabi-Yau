@@ -8,7 +8,7 @@ from reward_functions.max_tri import MaxTriangulationReward
 from reward_functions.max_cy_volume import MaxCYVolumeReward
 from reward_functions.max_kcup import MaxKcupReward
 from reward_functions.max_toric_cy_volume import MaxToricCYVolumeReward
-from reward_functions.min_mori_cap import MinMoriCapReward
+from reward_functions.min_mori_cap import MORI_CAP_BACKENDS, MinMoriCapReward
 
 Goal = Literal["min", "max"]
 SUPPORTED_REWARDS = (
@@ -36,8 +36,13 @@ def _validate_reward_name(name: str) -> str:
     return normalized
 
 
-def get_reward(name: str, *, cy_volume_reward_transform: str = "raw") -> Reward:
+def get_reward(name: str, *, cy_volume_reward_transform: str = "raw",
+               mori_cap_backend: str = "cytools") -> Reward:
     normalized = _validate_reward_name(name)
+    if mori_cap_backend not in MORI_CAP_BACKENDS:
+        raise ValueError(f"Unknown Mori cap backend {mori_cap_backend!r}; expected {MORI_CAP_BACKENDS}.")
+    if normalized != "min_mori_cap" and mori_cap_backend != "cytools":
+        raise ValueError("mori_cap_backend is only valid with the min_mori_cap reward.")
     resolved_transform = str(cy_volume_reward_transform).strip().lower()
     if normalized != "max_cy_volume" and resolved_transform != "raw":
         raise ValueError(
@@ -54,7 +59,7 @@ def get_reward(name: str, *, cy_volume_reward_transform: str = "raw") -> Reward:
     if normalized == "max_toric_cy_volume":
         return MaxToricCYVolumeReward()
     if normalized == "min_mori_cap":
-        return MinMoriCapReward()
+        return MinMoriCapReward(backend=mori_cap_backend)
     raise AssertionError(f"Unhandled reward function '{normalized}'.")
 
 

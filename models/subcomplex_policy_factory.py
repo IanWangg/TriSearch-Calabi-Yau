@@ -4,6 +4,8 @@ from typing import Type
 
 import torch.nn as nn
 
+from core.cy_episode_context import BEST_SO_FAR, INCREMENTAL, STEP_LOG_VOLUME
+
 from .egnn_subcomplex_predictor import EGNNSubcomplexAgent
 from .gcn_subcomplex_predictor import GCNSubcomplexAgent
 from .subcomplex_policy_config import (
@@ -87,7 +89,10 @@ def build_subcomplex_agent(
             two_face_encoder=two_face_encoder, two_face_triangle_layers=two_face_triangle_layers,
         )
 
-    if training_reward_mode != "step_log_volume":
+    if training_reward_mode == BEST_SO_FAR:
+        if resolved_model_type != "egnn" or resolved_actor_type != "snn_simplex":
+            raise ValueError("best_so_far requires the EGNN snn_simplex policy.")
+    elif training_reward_mode not in (STEP_LOG_VOLUME, INCREMENTAL):
         raise ValueError("Episode context requires two_face_deep_sets.")
     agent_cls = get_subcomplex_agent_class(resolved_model_type)
     kwargs = dict(
@@ -103,5 +108,7 @@ def build_subcomplex_agent(
     )
     if resolved_model_type == "egnn":
         kwargs["subcomplex_decoder_num_layers"] = subcomplex_decoder_num_layers
+        if training_reward_mode == BEST_SO_FAR:
+            kwargs.update(training_reward_mode=training_reward_mode, episode_horizon=episode_horizon)
     kwargs["subcomplex_actor_type"] = resolved_actor_type
     return agent_cls(**kwargs)

@@ -616,7 +616,9 @@ class CYRandomRolloutEngine:
             raise ValueError("two_face_state currently supports only max_kcup.")
         if name in ("min_tri", "max_tri"):
             return float(len(state.simplices))
-        cache_key = (name, evaluation_state_key(state, self.two_face_state))
+        backend = getattr(self.reward_function, "mori_cap_backend", "cytools")
+        cache_name = (name, backend) if name == "min_mori_cap" else name
+        cache_key = (cache_name, evaluation_state_key(state, self.two_face_state))
         cached = self._objective_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -625,7 +627,7 @@ class CYRandomRolloutEngine:
             raise RuntimeError("Geometry objective requires a managed transition pool.")
         result = next(pool.imap(execute_geometry_request, [{"operation": "objective",
             "configuration": state.configuration, "state": state.to_payload(), "reward_name": name,
-            "two_face_state": self.two_face_state}]))
+            "two_face_state": self.two_face_state, "mori_cap_backend": backend}]))
         self._objective_cache[cache_key] = float(result)
         return float(result)
 
@@ -643,9 +645,11 @@ class CYRandomRolloutEngine:
             yield from (float(len(state.simplices)) for state in states)
             return
         requests, positions, cached_values, pending = [], [], {}, {}
+        backend = getattr(self.reward_function, "mori_cap_backend", "cytools")
+        cache_name = (name, backend) if name == "min_mori_cap" else name
         cache_enabled = self._objective_cache.max_bytes > 0 and self._objective_cache.max_entries != 0
         for index, state in enumerate(states):
-            key = (name, evaluation_state_key(state, self.two_face_state))
+            key = (cache_name, evaluation_state_key(state, self.two_face_state))
             cached = self._objective_cache.get(key)
             if cached is not None:
                 cached_values[index] = cached
@@ -655,7 +659,7 @@ class CYRandomRolloutEngine:
                 pending[key] = len(requests)
                 requests.append({"operation": "objective", "configuration": state.configuration,
                                  "state": state.to_payload(), "reward_name": name,
-                                 "two_face_state": self.two_face_state})
+                                 "two_face_state": self.two_face_state, "mori_cap_backend": backend})
             positions.append(pending[key])
         if requests and self.transition_pool is None:
             raise RuntimeError("Geometry objective requires a managed transition pool.")
@@ -669,7 +673,7 @@ class CYRandomRolloutEngine:
                 else:
                     if position not in resolved:
                         resolved[position] = float(next(outputs))
-                        self._objective_cache[(name, evaluation_state_key(state, self.two_face_state))] = resolved[position]
+                        self._objective_cache[(cache_name, evaluation_state_key(state, self.two_face_state))] = resolved[position]
                     yield resolved[position]
         finally:
             close = getattr(outputs, "close", None)

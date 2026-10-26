@@ -34,7 +34,7 @@ class EvaluationResult:
 
 def _environment_metadata() -> dict:
     packages = {}
-    for name in ("cytools", "cyopt", "numpy", "torch", "torch_geometric", "datasets", "huggingface_hub"):
+    for name in ("cytools", "cyopt", "Mosek", "numpy", "torch", "torch_geometric", "datasets", "huggingface_hub"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
@@ -124,7 +124,7 @@ def run_evaluation(
                     two_face_state=spec.two_face_state,
                     include_two_face_metadata=(getattr(policy, "observation_kind", spec.policy_observation_kind) == "two_face"),
                 )
-                reward = get_reward(spec.reward_function)
+                reward = get_reward(spec.reward_function, mori_cap_backend=spec.mori_cap_backend)
                 objective = get_objective(spec.reward_function, reward=reward)
                 goal = infer_goal(spec.reward_function)
                 engine = CYRandomRolloutEngine(

@@ -26,6 +26,7 @@ class EvaluationSpec:
     seed: int = 0
     algorithms: tuple[str, ...] = ("random", "greedy")
     reward_function: str = "max_kcup"
+    mori_cap_backend: str = "cytools"
     cache_states: bool = True
     runtime_cache_gb: float = 1.0
     memory_budget_gb: float = 64.0
@@ -128,9 +129,13 @@ class EvaluationSpec:
                                          self.two_face_triangle_layers)
         if self.policy_observation_kind == "two_face" and (self.reward_function != "max_kcup" or self.in_channels != 4):
             raise ValueError("two_face_deep_sets evaluation requires 4D max_kcup data.")
-        from reward_functions import infer_goal
+        from reward_functions import MORI_CAP_BACKENDS, infer_goal
 
         infer_goal(self.reward_function)
+        if self.mori_cap_backend not in MORI_CAP_BACKENDS:
+            raise ValueError(f"Unknown Mori cap backend: {self.mori_cap_backend!r}.")
+        if self.mori_cap_backend != "cytools" and self.reward_function != "min_mori_cap":
+            raise ValueError("mori_cap_backend is only valid with min_mori_cap.")
 
     @property
     def policy_observation_kind(self) -> str:

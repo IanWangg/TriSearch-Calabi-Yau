@@ -8,9 +8,22 @@ if TYPE_CHECKING:
 else:
     CYTriangulationState = Any
 
+MORI_CAP_BACKENDS = ("cytools", "mosek")
 
-def mori_cap_target(cy) -> float:
+
+def mori_cap_target(cy, *, backend="cytools") -> float:
+    if backend not in MORI_CAP_BACKENDS:
+        raise ValueError(f"Unknown Mori cap backend {backend!r}; expected {MORI_CAP_BACKENDS}.")
     cap = cy.mori_cone_cap(in_basis=True)
+    if backend == "mosek":
+        from core.mori_extremal_rays import NonPointedConeError, mosek_extremal_rays
+
+        try:
+            return float(len(mosek_extremal_rays(cap.rays())))
+        except NonPointedConeError:
+            # Preserve minimal=True semantics for cones with lineality. Solver
+            # failures and unverified certificates are deliberately not caught.
+            pass
     return float(len(cap.extremal_rays()))
 
 
@@ -19,7 +32,10 @@ class MinMoriCapReward(Reward):
 
     reward_name = "min_mori_cap"
 
-    def __init__(self) -> None:
+    def __init__(self, *, backend="cytools") -> None:
+        if backend not in MORI_CAP_BACKENDS:
+            raise ValueError(f"Unknown Mori cap backend {backend!r}; expected {MORI_CAP_BACKENDS}.")
+        self.mori_cap_backend = backend
         self._objective_by_state_key = BoundedLRU(max_bytes=16 * 1024**2, max_entries=8192)
 
     def metric(self, state: CYTriangulationState) -> float:
@@ -35,7 +51,7 @@ class MinMoriCapReward(Reward):
         if triangulation is None:
             raise ValueError("min_mori_cap requires a materialized CYTools triangulation.")
 
-        objective = mori_cap_target(triangulation.get_cy())
+        objective = mori_cap_target(triangulation.get_cy(), backend=self.mori_cap_backend)
         self._objective_by_state_key[state_key] = objective
         return objective
 

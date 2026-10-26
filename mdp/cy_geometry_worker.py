@@ -300,7 +300,9 @@ def _objective(request, configuration, payload, polytope):
     # Registration entries can be evicted independently of scalar objectives.
     # Include the immutable geometry, because an index may be reused by another
     # collection sharing this worker pool after the old registration disappears.
-    cache_key = (configuration, name, key)
+    mori_cap_backend = request.get("mori_cap_backend", "cytools")
+    cache_name = (name, mori_cap_backend) if name == "min_mori_cap" else name
+    cache_key = (configuration, cache_name, key)
     cached = _OBJECTIVES.get(cache_key)
     if cached is not None:
         return cached
@@ -308,7 +310,8 @@ def _objective(request, configuration, payload, polytope):
 
     triangulation = _triangulate(polytope, configuration, simplices)
     state = SimpleNamespace(key=key, simplices=frozenset(simplices), cy_triangulation=triangulation)
-    value = float(get_objective(name, reward=get_reward(name))(state))
+    options = {"mori_cap_backend": mori_cap_backend} if name == "min_mori_cap" else {}
+    value = float(get_objective(name, reward=get_reward(name, **options))(state))
     _OBJECTIVES[cache_key] = value
     return value
 

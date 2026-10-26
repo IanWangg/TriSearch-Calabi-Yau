@@ -6,7 +6,10 @@ from typing import Any, List, Sequence
 
 import torch
 
-from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME, STEP_LOG_VOLUME, TRAINING_REWARD_MODES
+from core.cy_episode_context import (
+    BEST_SO_FAR, BEST_SO_FAR_LOG_VOLUME, FINITE_EPISODE_MODES,
+    STEP_LOG_VOLUME, TRAINING_REWARD_MODES,
+)
 from mdp.cy_state_record import NEIGHBOR_MODES
 from models.subcomplex_policy_config import (
     DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
@@ -17,7 +20,7 @@ from models.subcomplex_policy_config import (
     value_feature_source_for_subcomplex_actor,
     validate_two_face_encoder_options,
 )
-from reward_functions import CY_VOLUME_REWARD_TRANSFORMS, SUPPORTED_REWARDS
+from reward_functions import CY_VOLUME_REWARD_TRANSFORMS, MORI_CAP_BACKENDS, SUPPORTED_REWARDS
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ class CYTrainingConfig:
     neighbor_mode: str
     reward_function: str | None
     cy_volume_reward_transform: str
+    mori_cap_backend: str
     training_reward_mode: str
     seed: int
     num_eval_polytopes: int
@@ -161,6 +165,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "V_next - V_current; 'log' uses log(V_next) - log(V_current)."
         ),
     )
+    parser.add_argument("--mori_cap_backend", choices=MORI_CAP_BACKENDS, default="cytools",
+                        help="Extremal-ray LP backend for min_mori_cap; mosek reuses single-thread simplex tasks.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument(
         "--num_eval_polytopes",
@@ -180,7 +186,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Number of parallel rollout environments.",
     )
     parser.add_argument("--training_reward_mode", choices=TRAINING_REWARD_MODES, default=STEP_LOG_VOLUME,
-                        help="Legacy per-step reward, or finite-episode best log Kcup improvement (two_face only).")
+                        help="Per-step reward, best log Kcup improvement (two_face), or best_so_far min_mori_cap improvement (SNN).")
     parser.add_argument("--rollout_length", type=int, default=None)
     parser.add_argument("--gamma", type=float, default=None)
     parser.add_argument("--gae_lambda", type=float, default=0.95)
@@ -435,7 +441,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Maximum number of dataset rows kept in dry-run mode.",
     )
     args = parser.parse_args(argv)
-    finite = args.training_reward_mode == BEST_SO_FAR_LOG_VOLUME
+    finite = args.training_reward_mode in FINITE_EPISODE_MODES
     if args.gamma is None:
         args.gamma = 1.0 if finite else 0.95
     if args.rollout_length is None:
@@ -500,6 +506,13 @@ def validate_two_face_training_args(args: argparse.Namespace) -> None:
     validate_two_face_encoder_options(args.subcomplex_actor_type,
                                      getattr(args, "two_face_encoder", None),
                                      getattr(args, "two_face_triangle_layers", None))
+    if getattr(args, "training_reward_mode", STEP_LOG_VOLUME) == BEST_SO_FAR:
+        if args.subcomplex_actor_type != "snn_simplex" or args.reward_function != "min_mori_cap":
+            raise ValueError("best_so_far requires snn_simplex and min_mori_cap.")
+        if args.gamma != 1.0 or args.rollout_length <= 0 or args.eval_steps <= 0:
+            raise ValueError("best_so_far requires gamma=1 and positive episode lengths.")
+        if args.vertex_aug_enable:
+            raise ValueError("best_so_far requires augmentation disabled.")
     if getattr(args, "training_reward_mode", STEP_LOG_VOLUME) == BEST_SO_FAR_LOG_VOLUME:
         if args.subcomplex_actor_type != "two_face_deep_sets":
             raise ValueError("best_so_far_log_volume requires two_face_deep_sets.")
@@ -562,8 +575,8 @@ def format_float_suffix(value: float) -> str:
 
 def build_training_variant_suffix(args: argparse.Namespace) -> str:
     suffix_parts: List[str] = []
-    if getattr(args, "training_reward_mode", STEP_LOG_VOLUME) == BEST_SO_FAR_LOG_VOLUME:
-        suffix_parts.append(BEST_SO_FAR_LOG_VOLUME)
+    if getattr(args, "training_reward_mode", STEP_LOG_VOLUME) in FINITE_EPISODE_MODES:
+        suffix_parts.append(args.training_reward_mode)
     subcomplex_actor_type = normalize_subcomplex_actor_type(
         getattr(args, "subcomplex_actor_type", DEFAULT_SUBCOMPLEX_ACTOR_TYPE)
     )

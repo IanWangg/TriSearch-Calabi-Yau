@@ -326,6 +326,30 @@ The reported objective is the raw extremal-ray count, and the transition reward
 is the current count minus the next count, so reducing the count gives positive
 reward. This objective uses complete triangulation states.
 
+Pass `--mori_cap_backend mosek` to training or evaluation to compute the same
+objective with reusable, single-thread MOSEK primal-simplex LPs. The backend
+checks reconstruction residuals and infeasibility certificates, retries an
+inconclusive solve once, and preserves CYTools' lineality decomposition for
+non-pointed cones. The general CLI default remains `cytools`; the dedicated
+`train_cy_snn_min_mori_cap.sh` launcher selects `mosek`. The selected backend is
+recorded in W&B/configuration and included in worker/engine objective cache keys.
+Existing training processes retain their loaded backend until restarted.
+
+For a cold-geometry comparison of both simplex variants against CYTools, run
+`python tools/benchmark_mori_extremal_rays.py --cpu_id 16 --output_dir runs/mori_lp_benchmark`.
+The benchmark verifies normalized ray-set equality and separately records cap
+construction, extremal-ray extraction, and complete objective timings.
+
+`train_cy_snn_min_mori_cap.sh incremental` trains with the per-step count decrease;
+`train_cy_snn_min_mori_cap.sh best_so_far` rewards only new episode minima.
+The latter conditions the SNN actor and critic on the current count, gap to the
+best count, and remaining steps, uses a finite rollout with zero terminal
+bootstrap and `gamma=1`, and adds the exploration bonus only to training rewards.
+Both launchers use the h11=15 baseline dataset, 64-step rollouts, online W&B,
+entropy/count bonus coefficients of 0.001, 16 geometry workers, and a 48 GiB
+process-tree memory budget. Incremental training keeps the baseline `gamma=0.95`.
+Caller arguments override defaults; use a detached session for unattended runs.
+
 ## Training Logs
 
 Training reports one cumulative return summary after each complete rollout:
