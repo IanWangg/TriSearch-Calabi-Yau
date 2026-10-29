@@ -118,8 +118,8 @@ class EvaluationSpec:
             raise ValueError("ga_elitism must be in [1, ga_population_size) to retain the feasible start.")
         if not math.isfinite(self.ga_mutation_rate) or not 0 <= self.ga_mutation_rate <= 1:
             raise ValueError("ga_mutation_rate must be finite and in [0, 1].")
-        if "cyopt_ga" in self.algorithms and self.reward_function != "max_kcup":
-            raise ValueError("cyopt_ga currently supports max_kcup, an objective on 2-face triangulation classes.")
+        if "cyopt_ga" in self.algorithms and self.reward_function not in {"max_kcup", "min_mori_cap"}:
+            raise ValueError("cyopt_ga supports max_kcup and min_mori_cap, objectives on 2-face triangulation classes.")
         if (set(self.algorithms) & value_search_names
                 and self.reward_function != "max_kcup"):
             raise ValueError("Metric-value search currently supports only max_kcup, using natural log volume.")

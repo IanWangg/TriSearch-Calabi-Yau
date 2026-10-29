@@ -1,0 +1,17 @@
+{
+  "best_first": {
+    "cpu_count": 5,
+    "transition_num_workers": 4,
+    "memory_budget_gb": 16
+  },
+  "beam_search": {
+    "cpu_count": 5,
+    "transition_num_workers": 4,
+    "memory_budget_gb": 16
+  },
+  "cyopt_ga": {
+    "cpu_count": 5,
+    "transition_num_workers": 4,
+    "memory_budget_gb": 16
+  }
+}

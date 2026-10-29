@@ -129,14 +129,16 @@ def test_real_cyopt_face_samples_preserve_ambient_labels():
         assert _label_face_triangulations(face, [restored])[0] is restored
 
 
-def test_real_cyopt_encoding_queries_cache_equivalence_and_paired_start(tmp_path):
+@pytest.mark.parametrize("objective_name", ["max_kcup", "min_mori_cap"])
+def test_real_cyopt_encoding_queries_cache_equivalence_and_paired_start(tmp_path, objective_name):
     from eval.pipeline import run_evaluation
     from eval.setup import EvaluationSetup, save_eval_setup
     from eval.results.plotting import read_comparison
 
     fixture = Path(__file__).resolve().parents[1] / "data/cy/two_neighbors_h11_12.samples.jsonl"
     row = json.loads(fixture.read_text().splitlines()[0])
-    spec = EvaluationSpec(1, 12, 1, 9, algorithms=("cyopt_ga",), ga_population_size=4)
+    spec = EvaluationSpec(1, 12, 1, 9, algorithms=("cyopt_ga",), ga_population_size=4,
+                          reward_function=objective_name)
     setup = EvaluationSetup([row], {"parameters": spec.setup_parameters(), "source_metadata": {"fixture": str(fixture)}})
     save_eval_setup(setup, tmp_path / "setup")
     warm = run_evaluation(spec, setup, output_dir=tmp_path / "warm")
@@ -145,7 +147,13 @@ def test_real_cyopt_encoding_queries_cache_equivalence_and_paired_start(tmp_path
     assert warm.rollouts[0].objective_queries == 9
     assert (warm.output_dir / "queries.jsonl").read_text() == (cold.output_dir / "queries.jsonl").read_text()
     assert (warm.output_dir / "expansions.jsonl").read_text() == (cold.output_dir / "expansions.jsonl").read_text()
-    read_comparison(warm.output_dir)
+    if objective_name == "max_kcup":
+        read_comparison(warm.output_dir)
+    config = json.loads((warm.output_dir / "config.json").read_text())
+    assert config["cyopt"]["fitness"] == ("negative_raw_objective" if objective_name == "max_kcup"
+                                         else "raw_objective")
+    if objective_name == "min_mori_cap":
+        assert warm.rollouts[0].best_objective <= warm.rollouts[0].initial_objective
     first = json.loads(next((warm.output_dir / "cyopt_encoding").glob("*.json")).read_text())
     second = json.loads(next((cold.output_dir / "cyopt_encoding").glob("*.json")).read_text())
     assert first["codebook_sha256"] == second["codebook_sha256"]

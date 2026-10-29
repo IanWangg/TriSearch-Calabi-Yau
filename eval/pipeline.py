@@ -105,7 +105,8 @@ def run_evaluation(
             config["cyopt"] = {
                 **cyopt_metadata(), "representation": "sorted_2_face_triangulations",
                 "initial_population": "shared_start_then_uniform_dna",
-                "fitness": "negative_raw_objective", "selection": "tournament_k_3",
+                "fitness": ("negative_raw_objective" if infer_goal(spec.reward_function) == "max"
+                            else "raw_objective"), "selection": "tournament_k_3",
                 "crossover": "npoint_1", "mutation_k": 1, "fitness_cache_size": 0,
                 "budget_tail": "stop_before_next_objective_query",
                 "infeasible_dna": "free_geometry_rejection_logged_in_expansion",

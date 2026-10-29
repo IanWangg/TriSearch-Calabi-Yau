@@ -68,6 +68,20 @@ def test_floating_generators_are_not_rounded_to_integer_rays():
     assert {tuple(ray) for ray in result} == {(.5, 0.), (0., .25)}
 
 
+@pytest.mark.parametrize("optimizer", ["primal_simplex", "dual_simplex"])
+def test_real_degenerate_mori_cap_preserves_fixed_variable_bounds(optimizer):
+    # Captured from the first full-size h11=15 training rollout. With presolve
+    # disabled, MOSEK 11.1.10 could report optimal with a fixed weight of -0.625.
+    fixture = Path(__file__).parent / "fixtures/mori_cap_fixed_bounds_rays.npz"
+    with np.load(fixture) as data:
+        rays = data["rays"]
+        expected = data["expected_extremal_rays"]
+    stats = {}
+    result = mosek_extremal_rays(rays, optimizer=optimizer, diagnostics=stats)
+    assert len(result) == 27
+    assert _canonical(result) == _canonical(expected)
+
+
 @pytest.mark.parametrize("rays", [[[1, 0], [-1, 0]], [[1, 0], [-1, 0], [0, 1]]])
 def test_non_pointed_cones_require_lineality_decomposition(rays):
     with pytest.raises(NonPointedConeError):
@@ -100,7 +114,7 @@ def test_unverified_infeasibility_certificate_cannot_increase_extremal_count(mon
     import mosek
 
     monkeypatch.setattr(mosek.Task, "gety", lambda task, *args: np.zeros(task.getnumcon()))
-    with pytest.raises(ExtremalRaySolveError, match="Ray 0"):
+    with pytest.raises(ExtremalRaySolveError, match="Ray"):
         mosek_extremal_rays([[1, 0], [0, 1], [1, 1]])
 
 

@@ -278,8 +278,11 @@ mutation probability `ga_mutation_rate=0.1`, one mutated gene, and `ga_elitism=1
 `ga_population_size`, `ga_mutation_rate`, `ga_elitism`,
 `ga_max_stalled_generations`, `ga_face_max_points` and `ga_face_samples` are shared
 JSON/CLI settings. Elitism is capped at DNA space size minus one for tiny spaces.
-Fitness is negative raw `max_kcup` volume (cyopt minimizes); all reported
-objectives remain positive raw volumes. Upstream selection, crossover, mutation,
+Supported objectives are `max_kcup` and `min_mori_cap`, both determined by
+2-face triangulations. Fitness is negative raw volume for `max_kcup`, and the
+raw number of Mori cap extremal rays for `min_mori_cap` (cyopt minimizes).
+The config records the corresponding fitness sign; reported objectives retain
+their raw values (volume or extremal ray count). Upstream selection, crossover, mutation,
 elitism and within-generation uniqueness are used unchanged. This is the cyopt
 GA with these declared settings, not a reproduction of every paper hyperparameter.
 

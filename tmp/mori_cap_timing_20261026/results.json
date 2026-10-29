@@ -1,0 +1,75 @@
+{
+  "dataset_path": "/home/yiranwang/combinartorics/TriSearch-Calabi-Yau/data/cy/output4d_hugging_face/cy_4d_h11_15_favorable_1000_frst_10.samples.jsonl",
+  "row_indices": [
+    0,
+    500,
+    999
+  ],
+  "frst_index": 0,
+  "repeats": 1,
+  "cytools_threads": 1,
+  "cpu_affinity": [
+    16
+  ],
+  "extremal_rays_method": "lp (CYTools default, scipy HiGHS)",
+  "fresh_geometry_for_each_sample": true,
+  "samples": [
+    {
+      "row_index": 0,
+      "polytope_index": 4,
+      "frst_index": 0,
+      "repetition": 0,
+      "num_input_vertices": 27,
+      "num_simplices": 66,
+      "polytope_sec": 0.002215895103290677,
+      "triangulate_sec": 0.0016036019660532475,
+      "get_cy_sec": 0.0020225660409778357,
+      "mori_cap_wall_sec": 0.15498303796630353,
+      "mori_cap_cpu_sec": 0.154876,
+      "num_generating_rays": 797,
+      "extremal_wall_sec": 97.72486076899804,
+      "extremal_cpu_sec": 97.720292402,
+      "num_extremal_rays": 29,
+      "objective_wall_sec": 97.87984380696435,
+      "extremal_fraction": 0.9984165990469708
+    },
+    {
+      "row_index": 500,
+      "polytope_index": 515,
+      "frst_index": 0,
+      "repetition": 0,
+      "num_input_vertices": 24,
+      "num_simplices": 77,
+      "polytope_sec": 0.0017703259363770485,
+      "triangulate_sec": 0.0015726189594715834,
+      "get_cy_sec": 0.002651429967954755,
+      "mori_cap_wall_sec": 0.08362251205835491,
+      "mori_cap_cpu_sec": 0.08361869899999874,
+      "num_generating_rays": 535,
+      "extremal_wall_sec": 30.567431009025313,
+      "extremal_cpu_sec": 30.56639685600001,
+      "num_extremal_rays": 32,
+      "objective_wall_sec": 30.651053521083668,
+      "extremal_fraction": 0.9972717899565562
+    },
+    {
+      "row_index": 999,
+      "polytope_index": 999,
+      "frst_index": 0,
+      "repetition": 0,
+      "num_input_vertices": 21,
+      "num_simplices": 60,
+      "polytope_sec": 0.0015317359939217567,
+      "triangulate_sec": 0.001414136029779911,
+      "get_cy_sec": 0.003605840029194951,
+      "mori_cap_wall_sec": 0.060702716931700706,
+      "mori_cap_cpu_sec": 0.06070405100001608,
+      "num_generating_rays": 271,
+      "extremal_wall_sec": 4.062352225999348,
+      "extremal_cpu_sec": 4.062218193999996,
+      "num_extremal_rays": 20,
+      "objective_wall_sec": 4.123054942931049,
+      "extremal_fraction": 0.985277247630237
+    }
+  ]
+}

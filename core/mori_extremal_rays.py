@@ -1,8 +1,9 @@
 """Extremal generators of a pointed cone using reusable, single-thread MOSEK LPs.
 
-For each generator r_i, test R.T @ x = r_i with x >= 0 and x_i = 0.
-Feasibility proves redundancy; a checked Farkas certificate proves extremality.
-Only the right-hand side and variable bounds change between solves.
+For each generator r_i, minimize r_i @ y subject to R_other @ y >= 0 and
+-1 <= y <= 1. This LP is always feasible and bounded. A negative optimum
+provides a separating functional; at zero optimum the LP dual supplies
+nonnegative reconstruction weights. Both certificates are checked explicitly.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ class NonPointedConeError(ValueError):
 
 
 class ExtremalRaySolveError(RuntimeError):
-    """No validated feasibility result or infeasibility certificate was obtained."""
+    """No validated reconstruction or separating certificate was obtained."""
 
 
 @lru_cache(maxsize=1)
@@ -65,7 +66,8 @@ def _configure_task(task, optimizer):
 
     task.putintparam(mosek.iparam.num_threads, 1)
     task.putintparam(mosek.iparam.optimizer, getattr(mosek.optimizertype, optimizer))
-    task.putintparam(mosek.iparam.presolve_use, mosek.presolvemode.off)
+    # Presolve is important for the degenerate Mori-cap constraint systems.
+    task.putintparam(mosek.iparam.presolve_use, mosek.presolvemode.on)
     task.putdouparam(mosek.dparam.basis_tol_x, 1e-9)
     task.putdouparam(mosek.dparam.basis_tol_s, 1e-9)
     task.putdouparam(mosek.dparam.optimizer_max_time, 30.0)
@@ -98,7 +100,7 @@ def _solve_checked(task, validate, diagnostics):
     finally:
         task.putintparam(mosek.iparam.optimizer, original)
         task.putintparam(mosek.iparam.sim_hotstart, mosek.simhotstart.free)
-        task.putintparam(mosek.iparam.presolve_use, mosek.presolvemode.off)
+        task.putintparam(mosek.iparam.presolve_use, mosek.presolvemode.on)
     raise ExtremalRaySolveError(
         f"MOSEK LP remained inconclusive after two attempts: {termination}, {status}."
     )
@@ -172,35 +174,38 @@ def mosek_extremal_rays(rays, *, optimizer="primal_simplex", tolerance=1e-7, dia
     keep = np.ones(count, dtype=bool)
     with environment.Task(0, 0) as task:
         _configure_task(task, optimizer)
-        task.appendcons(dimension)
-        task.appendvars(count)
-        task.putvarboundslice(0, count, [mosek.boundkey.lo] * count,
+        task.appendcons(count)
+        task.appendvars(dimension)
+        task.putvarboundslice(0, dimension, [mosek.boundkey.ra] * dimension,
+                             [-1.0] * dimension, [1.0] * dimension)
+        task.putconboundslice(0, count, [mosek.boundkey.lo] * count,
                              [0.0] * count, [0.0] * count)
-        for column, ray in enumerate(scaled):
-            indices = np.flatnonzero(ray)
-            task.putacol(column, indices.tolist(), ray[indices].tolist())
+        for column in range(dimension):
+            indices = np.flatnonzero(scaled[:, column])
+            task.putacol(column, indices.tolist(), scaled[indices, column].tolist())
 
         for index, target in enumerate(scaled):
             active[index] = False
-            task.putvarbound(index, mosek.boundkey.fx, 0.0, 0.0)
-            task.putconboundslice(0, dimension, [mosek.boundkey.fx] * dimension,
-                                 target.tolist(), target.tolist())
+            task.putconbound(index, mosek.boundkey.fr, 0.0, 0.0)
+            task.putclist(list(range(dimension)), target.tolist())
 
             def validate(status):
-                if status == mosek.solsta.optimal:
-                    weights = np.asarray(task.getxx(mosek.soltype.bas))
-                    if (np.isfinite(weights).all() and weights.min() >= -tolerance
-                            and np.max(np.abs(weights[~active])) <= tolerance
-                            and np.max(np.abs(scaled.T @ weights - target)) <= tolerance):
-                        return True
-                elif status == mosek.solsta.prim_infeas_cer:
-                    separating = np.asarray(task.gety(mosek.soltype.bas))
-                    scale = np.max(np.abs(separating))
-                    if np.isfinite(scale) and scale > 0:
-                        separating = separating / scale
-                        if (target @ separating > tolerance
-                                and np.all(scaled[active] @ separating <= tolerance)):
-                            return False
+                if status != mosek.solsta.optimal:
+                    return None
+                separating = np.asarray(task.getxx(mosek.soltype.bas))
+                if (not np.isfinite(separating).all()
+                        or np.max(np.abs(separating)) > 1.0 + tolerance
+                        or np.any(scaled[active] @ separating < -tolerance)):
+                    return None
+                if target @ separating < -tolerance:
+                    return False
+                # At optimum zero, box-bound multipliers vanish and the row
+                # dual is a conic reconstruction of the candidate generator.
+                weights = np.asarray(task.gety(mosek.soltype.bas))
+                if (np.isfinite(weights).all() and weights.min() >= -tolerance
+                        and np.max(np.abs(weights[~active])) <= tolerance
+                        and np.max(np.abs(scaled.T @ weights - target)) <= tolerance):
+                    return True
                 return None
 
             try:
@@ -211,7 +216,7 @@ def mosek_extremal_rays(rays, *, optimizer="primal_simplex", tolerance=1e-7, dia
                 keep[index] = False
             else:
                 active[index] = True
-                task.putvarbound(index, mosek.boundkey.lo, 0.0, 0.0)
+                task.putconbound(index, mosek.boundkey.lo, 0.0, 0.0)
     result = generators[keep]
     stats.update(extremal_rays=len(result), total_sec=time.perf_counter() - started)
     return result

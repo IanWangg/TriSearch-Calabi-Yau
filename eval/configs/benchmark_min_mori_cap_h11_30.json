@@ -1,0 +1,20 @@
+{
+  "num_polytopes": 5,
+  "h11": 30,
+  "num_starts": 1,
+  "objective_budget": 1000,
+  "seed": 0,
+  "algorithms": [
+    "best_first",
+    "beam_search",
+    "cyopt_ga"
+  ],
+  "reward_function": "min_mori_cap",
+  "beam_width": 4,
+  "cache_states": true,
+  "runtime_cache_gb": 4,
+  "memory_budget_gb": 16,
+  "transition_num_workers": 4,
+  "force_cpu": true,
+  "hf_revision": "60c0e119a03608418df538191f65da3f43b5b819"
+}

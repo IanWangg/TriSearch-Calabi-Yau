@@ -171,11 +171,11 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 
 ### cyopt genetic algorithm
 
-- `cyopt_ga` 是 population family，经 `PopulationAlgorithm.run_population` 和共享 `_PopulationContext` 计费；直接调用已安装的上游 `cyopt.GA`，不另写选择、交叉、变异或代际去重实现。目前仅支持 `max_kcup`。
+- `cyopt_ga` 是 population family，经 `PopulationAlgorithm.run_population` 和共享 `_PopulationContext` 计费；直接调用已安装的上游 `cyopt.GA`，不另写选择、交叉、变异或代际去重实现。支持二维面 objective `max_kcup` 和 `min_mori_cap`；后者 fitness 为原始 Mori cap 极射线数，按最小化排序，查询计费不变。
 - 二维面 DNA 由上游 `cyopt.frst` 编解码。每个 polytope 的 codebook 按 canonical simplices 固定排序，最多 12 点的面完整枚举，更大的面以派生 seed 采样最多 1000 个；参数 `ga_face_max_points` / `ga_face_samples` 可配置。目标求值前加入所有共享起点的面限制，保证输入起点可表示。codebook、哈希、各起点 DNA、参数和准备耗时写入 `cyopt_encoding/`，准备不消耗 objective 查询。
 - 每个 rollout 的种群第一项必须是该起点 DNA，复用其免费初始值；其余随机种群成员的有效 objective 查询计费。重复起点 DNA 返回原始完整 FRST，不能替换 q=0 的状态。多个互异完整 FRST 可有同一 DNA；空 DNA 正常以 `dna_space_singleton` 结束，保留全部配对起点。
 - 大面的上游 `grow_frt` 可能返回重新编号的局部二维 polytope。适配器必须按点坐标映射回该 face 的 ambient 标签，再规范化、排序和合并起点限制；点集合不匹配时明确失败，不能把局部编号当作全局标签。
-- 默认种群 50、tournament k=3、单点 crossover、mutation rate=0.1、mutation k=1、elitism=1。优化 fitness 是负的原始 volume；记录的 objective 仍是正原始 volume。极小 DNA 空间的有效 elitism 截到空间大小减一并写入 generation 日志。
+- 默认种群 50、tournament k=3、单点 crossover、mutation rate=0.1、mutation k=1、elitism=1。max_kcup fitness 是负的原始 volume，min_mori_cap fitness 是原始极射线数；记录的 objective 保持原值。极小 DNA 空间的有效 elitism 截到空间大小减一并写入 generation 日志。
 - 上游 fitness cache 必须为零；每次有效 fitness 请求走共享 rollout 查询计数，即使重复 DNA 或命中 engine cache 也计一次。保留 elite 的已知 fitness 不重新查询。上游重建明确返回 None 的 DNA 是免费几何拒绝，内部 fitness 为 inf，但不得把 inf 写成 volume；拒绝 DNA 及原因写入当前 expansion。其他异常正常失败，不吞掉。
 - DNA 解码别名可存入 engine 既有 bounded hot-state cache，以独立前缀、polytope index、codebook 哈希、DNA 为 key，共用原有容量和 pressure/close 生命周期，不另建缓存或增加额度。cache 关闭也必须关闭此别名缓存，起点 DNA 始终先返回该 rollout 的原始 FRST。缓存前后轨迹及计费须一致。
 - GA 在每次 fitness 请求前检查预算，允许在初始化/代际中途精确停下，无 overshoot；邻居算法仍完整处理已开始的父节点。所有比较取 `query_index <= budget`。连续 `ga_max_stalled_generations=20` 代没有有效查询时以 `no_feasible_offspring` 正常结束，不能无限重试。
