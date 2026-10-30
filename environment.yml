@@ -4,14 +4,25 @@ channels:
   - conda-forge
   - nodefaults
 
-# This reproduces the Linux/CUDA stack used for development. The NVIDIA driver
-# is supplied by the host and is intentionally not part of the environment.
+# Reproduces the Linux x86_64 / CUDA 11.8 `sage` environment used for the
+# experiments. Versions are pinned to what that environment imports at runtime.
+# - The NVIDIA driver comes from the host and must support CUDA 11.8.
+# - MOSEK needs a license: export MOSEKLM_LICENSE_FILE=/path/to/mosek.lic
 dependencies:
-  - python=3.11
+  - python=3.11.8
   - sage=10.6
+  - sagelib=10.6=py311h2605c74_0
+  - cysignals=1.12.3
   - scipy=1.15.2
   - tqdm=4.67.1
   - wandb=0.23.1
+  - matplotlib-base=3.10.1
+  - networkx=3.4.2
+  - numba=0.63.1
+  - cvxopt=1.3.2
+  - psutil=7.0.0
+  - pyyaml=6.0.2
+  - git
   - pip
   - pip:
       - --extra-index-url https://download.pytorch.org/whl/cu118
@@ -27,7 +38,24 @@ dependencies:
       - datasets==3.3.2
       - huggingface-hub==0.29.1
       - scikit-learn==1.6.1
-      - cytools==1.4.12
       - Mosek==11.1.10
       - pytest==9.0.2
+      # CYTools dependencies. Pinned because newer releases exist.
+      - python-flint==0.8.0
+      - pplpy==0.8.10
+      - ortools==9.15.6755
+      - highspy==1.12.0
+      - triangulumancer==0.3.0
+      - pypalp==0.1.1
+      - cygv==0.2.3
+      - regfans==0.2.1
+      - latticepts==0.3.0
+      - qpsolvers==4.8.2
+      - osqp==1.0.5
+      - joblib==1.4.2
+      - pyarrow==19.0.1
+      - sympy==1.13.1
+      # CYTools v1.4.12 + 14 commits (not on PyPI), and cyopt for the GA baseline.
+      - cytools @ git+https://github.com/LiamMcAllisterGroup/cytools.git@eae67f14278e7c03c43c18cf80cd9b7f13035bca
+      - cyopt @ git+https://github.com/sheride/cyopt.git@5a9ba057180c8e5b47f72680c85269b0264e2aea
       - -e .
