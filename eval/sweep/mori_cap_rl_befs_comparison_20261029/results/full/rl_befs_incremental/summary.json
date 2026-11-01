@@ -1,0 +1,35 @@
+{
+  "format_version": 2,
+  "status": "complete",
+  "setup_id": "52f4f93e5e4a7355013c147e33e737af2f07524ada4ea29fc143fa8a8ef2d3ee",
+  "num_rollouts": 25,
+  "objective_queries": 25050,
+  "transition_count": 0,
+  "expansion_count": 6646,
+  "budget_overshoot": 50,
+  "runtime_stats": {
+    "rl_value_best_first": {
+      "resident_graph_nodes": 13171,
+      "resident_graph_edges": 48721,
+      "resident_graph_bytes": 431733777,
+      "graph_evictions": 0,
+      "hot_state_bytes": 260037497,
+      "objective_cache_bytes": 16776393
+    }
+  },
+  "policy_stats": {
+    "rl_value_best_first": {
+      "action_batches": 294,
+      "value_batches": 294,
+      "action_states": 6646,
+      "value_states": 25050,
+      "physical_batches": 588,
+      "max_logical_batch_states": 100,
+      "data_build_sec": 161.12277714291122,
+      "batch_transfer_sec": 0.08644130313768983,
+      "inference_sec": 160.27873827936128,
+      "cuda_peak_allocated_bytes": 0,
+      "wall_sec": 42745.66403064306
+    }
+  }
+}

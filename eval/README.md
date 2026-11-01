@@ -2,6 +2,39 @@
 
 Development rules and evaluation semantics are maintained in [AGENTS.md](AGENTS.md).
 
+## Mori cap RL search and CPU evaluation
+
+`rl_value_best_first` and value beam support `min_mori_cap`. A context-free
+incremental critic ranks nodes by `-extremal_ray_count + value_discount * V`.
+A `best_so_far` SNN checkpoint loads its exact contextual architecture from
+`model_config.json` and ranks nodes by `-session_best_count + value_discount * V`.
+The latter refreshes the whole pending frontier after each search round, using
+the current minimum and `min(training_episode_horizon, remaining_query_budget)`.
+This is a heuristic mapping from query budget to training steps; the critic also
+includes its training count bonus. Neither score adds objective queries.
+
+Offline comparisons validate raw nonnegative integer ray counts and cumulative
+minima, exclude overshoot from endpoints, and plot counts on a linear axis.
+`labeled_run_dirs` explicitly compares named single-algorithm runs with different
+checkpoints; all setup and initial-state pairing checks still apply, and each
+source's policy hash is retained. Ordinary merges still require one checkpoint.
+
+On this machine, the CUDA-enabled PyTorch build can block during PyG's build
+configuration query even with no visible GPUs. The optional repository startup
+selects already-installed CPU PyG extensions, disables CUDA availability and
+initialization, and provides an explicitly abbreviated CPU capability report:
+
+```bash
+TRISEARCH_CPU_ONLY=1 PYTHONPATH="$PWD/tools/cpu_runtime:$PWD" \
+  OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  python scripts/eval_cy.py --config <config.json> --force_cpu
+```
+
+The startup is inherited by spawned workers and changes no installed packages.
+It does not replace the CUDA-enabled native autograd engine; backward-only
+training checks can still probe the system driver. Evaluation uses inference.
+See [the CPU Mori cap study](sweep/mori_cap_rl_befs_comparison_20261029/README.md).
+
 ## Two_face_state
 
 `two_face_state` defaults to `false`. Enable it with `--two_face_state` or

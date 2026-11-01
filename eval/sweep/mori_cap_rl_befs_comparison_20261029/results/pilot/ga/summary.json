@@ -1,0 +1,21 @@
+{
+  "format_version": 2,
+  "status": "complete",
+  "setup_id": "52f4f93e5e4a7355013c147e33e737af2f07524ada4ea29fc143fa8a8ef2d3ee",
+  "num_rollouts": 25,
+  "objective_queries": 3200,
+  "transition_count": 0,
+  "expansion_count": 104,
+  "budget_overshoot": 0,
+  "runtime_stats": {
+    "cyopt_ga": {
+      "resident_graph_nodes": 25,
+      "resident_graph_edges": 0,
+      "resident_graph_bytes": 322468,
+      "graph_evictions": 0,
+      "hot_state_bytes": 77626102,
+      "objective_cache_bytes": 7183009
+    }
+  },
+  "policy_stats": {}
+}

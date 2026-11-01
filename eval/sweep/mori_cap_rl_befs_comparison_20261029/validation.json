@@ -1,0 +1,25 @@
+{
+  "status": "complete",
+  "cpu_only": true,
+  "smoke_status": "complete",
+  "smoke_setup_id": "6de656674b09702a5f2236a2f84c0b8c7d708e875db3fb79aac52b612364c85f",
+  "tests": [
+    {
+      "tests": 176,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 5,
+      "name": "mori_cap_cpu_resume_regression",
+      "source_sha256": "74623167fd89a914e700ec71ebaa8605467d760be7a63c0863babb472bf2ab01"
+    },
+    {
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "name": "mori_cap_cpu_context_regression",
+      "source_sha256": "1d65a8e48cb6fdce5bf1ada293cb94abfa2647de8a817b4dab473fb4de4bd593"
+    }
+  ],
+  "recorded_at": "2026-10-29T22:27:59.341913+00:00"
+}

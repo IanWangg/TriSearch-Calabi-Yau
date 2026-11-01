@@ -68,3 +68,27 @@ ckpt/runs/
 !/eval/sweep/rl_attempts_summary_20261023_201927/README.md
 !/eval/sweep/rl_attempts_summary_20261023_201927/configs/
 !/eval/sweep/rl_attempts_summary_20261023_201927/scripts/
+
+# CPU Mori cap study: publish sources, compact results, and requested figures.
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/
+/eval/sweep/mori_cap_rl_befs_comparison_20261029/*
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/README.md
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/configs/
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/scripts/
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/validation.json
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/plots/
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/
+/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/pilot/
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/full/
+/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/pilot/*
+/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/full/*
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/study_run.json
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/ga/
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/vanilla_befs/
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/rl_befs_incremental/
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/rl_befs_best_so_far/
+/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/*/*
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/*/config.json
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/*/summary.json
+!/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/*/rollouts.jsonl

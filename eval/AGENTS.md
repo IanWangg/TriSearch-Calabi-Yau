@@ -64,7 +64,7 @@
 当前默认值为 `seed=0`、`algorithms=("random", "greedy")`、`reward_function="max_kcup"` 和开启运行时缓存。
 可选算法为 `random`、`greedy`、`best_first`、`beam_search`、`cyopt_ga`、`rl_stochastic_policy`、`rl_policy_beam_search`、`rl_value_beam_search` 和 `rl_value_best_first`。`beam_width=4` 为默认值，必须为正整数；它只影响 beam 搜索，不参与 setup 参数或校验标识。
 
-RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_kcup`。`rl_metric_value_beam_search` 与 `rl_metric_value_best_first` 仅保留为对应算法的兼容别名；单步 reward + value 搜索实现已删除。
+RL value beam / BeFS 统一代表 metric + value 搜索，支持 `max_kcup` 和 `min_mori_cap`。后者使用 `-objective + value_discount * V`，不取对数。`rl_metric_value_beam_search` 与 `rl_metric_value_best_first` 仅保留为对应算法的兼容别名；单步 reward + value 搜索实现已删除。
 本版本使用 `two_neighbors` 的 FRST evaluation。新增其他 transition 模式时，必须明确合法状态、起点和 objective 的适用范围。
 
 ### 来源与筛选
@@ -155,7 +155,8 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 - `rl_policy_beam_search`：每父节点取最多 `beam_width=k` 个 policy 概率最高的未发现目标，全部查询 objective；按累计 `log π` 保留下一层 top k，不作长度归一化。
 - `rl_value_beam_search`：每父节点取最多 `policy_proposal_count=m` 个 policy 提案，全部查询 objective；按 `ln(volume_child) + value_discount * V(child)` 保留下一层 top k。
 - `rl_value_best_first`：从全局 frontier 取上述 metric + value 分数最大的节点，每次只展开一个父节点，所有已查询的未展开子节点保留在全局优先队列中，不设置 frontier 上限。分数并列按首次发现顺序；初始节点直接展开，死路后继续处理其余 frontier。
-- RL value beam / BeFS 的 metric 明确为绝对 volume 的自然对数，不减父节点 metric，不累计路径 reward。直接复用已经查询的 child objective，不能为 metric 再查询。非 `max_kcup` 输入必须明确报错。`rl_metric_value_*` 仅是对应算法的兼容别名，不代表另一种评分规则。
+- RL value beam / BeFS 的 metric 对 `max_kcup` 为绝对 volume 的自然对数，对 `min_mori_cap` 为原始极射线数的负值；不减父节点 metric，不累计路径 reward。直接复用已经查询的 child objective，不能为 metric 再查询。其他 objective 必须明确报错。`rl_metric_value_*` 仅是对应算法的兼容别名，不代表另一种评分规则。
+- Mori cap `best_so_far` SNN checkpoint 严格加载其 sidecar 和上下文模型。actor/critic 使用 `MinimizationEpisodeContext(current, session_best, H)`，其中 `H=min(training_episode_horizon, remaining_objective_queries)`；查询数只是训练步数的启发式代理，不改变计费。value 搜索使用 `-session_best + value_discount * V`；每轮结束后重算所有未展开 BeFS 节点，只推理网络，不重新查询 objective。critic 包含训练 count bonus，不是精确的未来下降量。记录 `negative_best_objective_plus_discounted_remaining_best_decrease` 和 horizon 规则。
 - `best_so_far_log_volume` checkpoint 的 critic 预测 remaining best-log-volume gain，value BeFS/Beam 改用 `ln(session_best_volume) + value_discount * V(state, session_best_volume, remaining_budget)`；默认训练 horizon 为 128，配对评估用 128 查询。每轮完整消费 objective 批次后以最新 session context 计算候选分数，BeFS 同时重算全部未展开队列节点；只推理网络，不重新查询 objective 或免费展开队列。policy 提案使用轮次开始时的已知 context。`value_discount=1` 为预计最终 best log volume 的单路径启发式，并不保证树搜索 value 校准。policy beam 仍按累计 log probability 排序。配置记录 `ln_best_objective_plus_discounted_remaining_best_gain`、`value_context_refresh=after_each_search_round` 与 `proposal_context=round_start`；旧 checkpoint 评分不变。
 - `RLAlgorithm.score_candidate` 接收已记录的父/子 objective；默认实现保留四参数 `score` 扩展兼容。两个 RL value 搜索均覆盖该入口使用绝对 metric，不调用 transition reward。
 - 仅包含 RL value 搜索（含兼容别名）的运行允许 `value_discount` 为任意非负有限系数（包括大于 1）；默认值为 0.9。其他运行保留 `[0,1]` 限制。大于 1 的 sweep 与已有 baseline 使用独立 run，通过共享 setup 配对比较。
@@ -237,13 +238,14 @@ RL value beam / BeFS 统一代表 metric + value 搜索，目前仅支持 `max_k
 - `--parallel_resources` 使用独立进程运行各算法，继续调用同一 `scripts/eval_cy.py` 与 `run_evaluation`。同一份 setup 只准备一次，所有算法使用相同校验标识和起点。
 - 资源文件按算法给出 CPU 数、geometry worker 数、进程树内存预算及 RL GPU index。CPU affinity 不重叠，并覆盖导入期间创建的后台线程及后续 worker；RL GPU 不共用，BLAS/OpenMP 每进程一个线程。每个 RL 子进程加载一次模型，并校验所有 RL 结果的 checkpoint SHA256 一致。
 - 每个子 run 保持结果格式 v2；父目录使用独立的 `benchmark.json`（格式 v1）记录资源、命令和状态，不复制或合并大体积原始日志。父清单只有所有子 run 成功后才标为 complete；失败保留日志并清理未完成进程。
-- 绘图支持完整单 run 的 v1/v2 与完整并行 benchmark，当前目标为 `max_kcup`。未知版本、不完整运行、错误计数、未配对起点和失败查询必须报错。
+- 绘图支持完整单 run 的 v1/v2 与完整并行 benchmark，目标为 `max_kcup` 或 `min_mori_cap`。后者验证非负整数、按最小值累计 best，使用线性极射线数坐标，并输出 `best_mori_cap_*` 图。未知版本、不完整运行、错误计数、未配对起点和失败查询必须报错。
 - 主图以逻辑查询次数为横轴，预算内最佳值仅使用 `query_index <= objective_budget`；完整展开造成的超预算最佳值保存在汇总 CSV，不提前算入曲线。正常提前结束可延续最后 best，失败不能按此方式填充。
 - Comparison 图统一展示原始 **best CY volume**，使用以 10 为底的对数坐标轴，刻度保留原始 volume 数值；不再展示相对起点的提升或 log gain。各 polytope 展示起点间中位数和 IQR；总览汇总全部配对起点的中位数和 IQR（每个 polytope 的起点数相同）。预算末端排名使用最佳 volume 中位数。
 - 用户提供最优参考值时，可额外添加 optimality gap comparison。默认对每个起点、每个查询预算先计算 `gap = reference_log10_kcup - log10(best_kcup)`，再计算起点间均值与样本标准差（`ddof=1`）；不得先平均 volume 再取 log。Gap 图使用线性纵轴与 mean ± SD 阴影，不截断 gap 或阴影，不将 SD 标为置信区间。保存参考值、来源、公式、逐起点 gap 和统计曲线；参考值仅用于对应的 polytope，不能自动套用到其他对象。该统计相对于最优参考值，与起点归一化提升不同。
 - 新派生图表的 `plot_config.json` 使用格式版本 2，记录绝对 volume 的统计定义；CSV 汇总绝对 volume，不再输出起点归一化的 gain 字段。原始 evaluation / setup 格式保持不变，历史结果不批量重写。
 - 自动出图和独立重画共享 `plot_evaluation`；只写派生图表和 CSV，不修改原始结果。
 - `--additional_run_dirs` 可合并已完成且算法不重叠的 runs；必须验证 setup、科学参数与 initial key/objective 配对，RL 来源还需一致的 checkpoint SHA256 和模型结构。要求显式独立 output_dir，plot_config 保存所有来源目录与 checkpoint 哈希，不复制/改写原始日志。支持 GA 两种正常提前终止原因。
+- 显式 `labeled_run_dirs` 可比较不同 checkpoint，每个来源只包含一种算法，必须仍验证相同 setup、科学参数和 initial key/objective。每种方法独立命名，plot_config 保存其来源与 policy 哈希；普通合并的同 checkpoint 限制保持不变。不同 Mori backend 不得静默合并。
 
 从仓库根目录执行：
 

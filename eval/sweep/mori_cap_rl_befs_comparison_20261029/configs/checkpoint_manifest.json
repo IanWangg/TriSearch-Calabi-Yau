@@ -1,0 +1,16 @@
+{
+  "rl_befs_incremental": {
+    "checkpoint": "eval/sweep/mori_cap_rl_befs_comparison_20261029/checkpoints/incremental/400.pth",
+    "sha256": "018369c745a4d52eff101d341f439496fc0914bb3fa74fc6fd9ec60f154571d5",
+    "source": "runs/min_mori_cap_h11_15_mosek_restart_20261026_144514_2595371/incremental_retry_2/checkpoints/400.pth",
+    "warm_start_iterations": 9,
+    "restart_iterations": 400
+  },
+  "rl_befs_best_so_far": {
+    "checkpoint": "eval/sweep/mori_cap_rl_befs_comparison_20261029/checkpoints/best_so_far/400.pth",
+    "sha256": "0c6aad8af655cb54ef9223b87985a24eedf9c0b1b943aad86bf4e7ca065046e9",
+    "source": "runs/min_mori_cap_h11_15_mosek_restart_20261026_144514_2595371/best_so_far_retry_2/checkpoints/400.pth",
+    "warm_start_iterations": 10,
+    "restart_iterations": 400
+  }
+}

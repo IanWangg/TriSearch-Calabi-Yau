@@ -1,0 +1,5 @@
+method,total_process_wall_sec,objective_queries,inference_sec,critic_states,actor_states,cuda_peak_allocated_bytes
+rl_befs_incremental,3869.061937300954,3208,11.223410134552978,3208,811,0
+rl_befs_best_so_far,3700.9408028969774,3204,110.41371955245268,38163,802,0
+vanilla_befs,3472.770419675042,3342,0,0,0,0
+ga,27207.279569095932,3200,0,0,0,0

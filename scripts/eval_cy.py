@@ -120,8 +120,8 @@ def parse_args(argv=None):
         EvaluationSpec(**spec_args)
     except (ValueError, TypeError) as exc:
         parser.error(str(exc))
-    if args.plot_results and (args.setup_only or args.reward_function != "max_kcup"):
-        parser.error("--plot_results requires a search evaluation with reward_function=max_kcup.")
+    if args.plot_results and (args.setup_only or args.reward_function not in {"max_kcup", "min_mori_cap"}):
+        parser.error("--plot_results requires a search evaluation with max_kcup or min_mori_cap.")
     if args.parallel_resources and args.setup_only:
         parser.error("--parallel_resources is for search, not --setup_only.")
     return args

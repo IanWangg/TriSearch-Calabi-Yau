@@ -78,7 +78,7 @@ class RLValueBeamSearch(RLAlgorithm):
 
     name = "rl_value_beam_search"
     requires_values = True
-    supported_objectives = ("max_kcup",)
+    supported_objectives = ("max_kcup", "min_mori_cap")
     value_score_definition = "ln_objective_plus_discounted_value"
     value_discount_upper_bound = math.inf
 
@@ -95,7 +95,8 @@ class RLValueBeamSearch(RLAlgorithm):
         self.requires_policy = count != -1
 
     def score_candidate(self, parent_score, log_probability, parent_objective, objective, reward, value):
-        return math.log(objective) + self.value_discount * value
+        metric = -objective if getattr(reward, "reward_name", None) == "min_mori_cap" else math.log(objective)
+        return metric + self.value_discount * value
 
 
 class RLValueBestFirst(RLValueBeamSearch):

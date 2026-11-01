@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from core.cy_checkpointing import find_latest_policy_checkpoint
-from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME
+from core.cy_episode_context import BEST_SO_FAR, BEST_SO_FAR_LOG_VOLUME, EpisodeContext, MinimizationEpisodeContext
 from core.cy_policy_inference import evaluate_policy_scores
 from core.cy_runtime_utils import load_policy_checkpoint, resolve_training_device
 from models.subcomplex_policy_factory import build_subcomplex_agent
@@ -35,10 +35,14 @@ class EvaluationPolicy:
         self.max_graph_size = max_graph_size
         self.metadata = dict(metadata or {})
         self.requires_episode_context = bool(getattr(model, "requires_episode_context", False))
+        self.objective_name = self.metadata.get("objective_name", "max_kcup")
+        self.episode_horizon = (getattr(model, "model_config", None) or {}).get("episode_horizon")
         if self.requires_episode_context:
             self.metadata.update(model.model_config)
             self.metadata.update(value_context_refresh="after_each_search_round",
                                  proposal_context="round_start")
+            if self.objective_name == "min_mori_cap":
+                self.metadata["context_horizon"] = "min(training_episode_horizon, remaining_objective_queries)"
         self.observation_kind = getattr(model, "observation_kind", "full_triangulation")
         self.metadata.update(
             policy_observation_kind=self.observation_kind,
@@ -64,14 +68,15 @@ class EvaluationPolicy:
         if normalize_subcomplex_actor_type(spec.subcomplex_actor_type) == "two_face_deep_sets":
             config.update(resolve_two_face_encoder_options(
                 spec.two_face_encoder, spec.two_face_triangle_layers, saved_config=saved))
-        if saved.get("training_reward_mode") == BEST_SO_FAR_LOG_VOLUME:
-            cls.validate_context_algorithms(spec.algorithms, spec.reward_function)
-            config.update(training_reward_mode=BEST_SO_FAR_LOG_VOLUME, episode_horizon=saved["episode_horizon"])
+        mode = saved.get("training_reward_mode")
+        if mode in (BEST_SO_FAR_LOG_VOLUME, BEST_SO_FAR):
+            cls.validate_context_algorithms(spec.algorithms, spec.reward_function, mode)
+            config.update(training_reward_mode=mode, episode_horizon=saved["episode_horizon"])
         model = build_subcomplex_agent(**config, device=str(device))
         load_policy_checkpoint(model, str(path), map_location=device)
         with path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        metadata = {"checkpoint": str(path), "checkpoint_sha256": digest,
+        metadata = {"checkpoint": str(path), "checkpoint_sha256": digest, "objective_name": spec.reward_function,
                     "model": config, "device": str(device), "vertex_preprocessing": "none",
                     "vertex_augmentation": False, "policy_max_graph_size": spec.policy_max_graph_size,
                     "profile_cuda_timing": spec.profile_cuda_timing,
@@ -80,14 +85,23 @@ class EvaluationPolicy:
         return cls(model, device=device, max_graph_size=spec.policy_max_graph_size, metadata=metadata)
 
     @staticmethod
-    def validate_context_algorithms(algorithms, objective_name="max_kcup"):
+    def validate_context_algorithms(algorithms, objective_name="max_kcup", training_reward_mode=None):
         from eval.algorithm.rl import RL_ALGORITHM_NAMES
         unsupported = [name for name in algorithms if name.startswith("rl_") and name not in RL_ALGORITHM_NAMES]
-        if unsupported or objective_name != "max_kcup":
-            raise ValueError("best_so_far_log_volume checkpoint requires a supported RL algorithm with max_kcup.")
+        expected = "min_mori_cap" if training_reward_mode == BEST_SO_FAR else "max_kcup"
+        if unsupported or objective_name != expected:
+            raise ValueError(f"Contextual checkpoint requires a supported RL algorithm with {expected}.")
+
+    def episode_context(self, current, best, remaining):
+        if self.objective_name == "min_mori_cap":
+            return MinimizationEpisodeContext(current, best, min(self.episode_horizon, remaining))
+        return EpisodeContext(current, best, remaining)
 
     @property
     def value_score_definition(self):
+        if self.objective_name == "min_mori_cap":
+            return ("negative_best_objective_plus_discounted_remaining_best_decrease"
+                    if self.requires_episode_context else "negative_objective_plus_discounted_value")
         return ("ln_best_objective_plus_discounted_remaining_best_gain"
                 if self.requires_episode_context else "ln_objective_plus_discounted_value")
 

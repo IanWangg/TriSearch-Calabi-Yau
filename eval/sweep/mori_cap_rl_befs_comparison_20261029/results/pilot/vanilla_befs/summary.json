@@ -1,0 +1,21 @@
+{
+  "format_version": 2,
+  "status": "complete",
+  "setup_id": "52f4f93e5e4a7355013c147e33e737af2f07524ada4ea29fc143fa8a8ef2d3ee",
+  "num_rollouts": 25,
+  "objective_queries": 3342,
+  "transition_count": 0,
+  "expansion_count": 215,
+  "budget_overshoot": 142,
+  "runtime_stats": {
+    "best_first": {
+      "resident_graph_nodes": 1640,
+      "resident_graph_edges": 2078,
+      "resident_graph_bytes": 34913978,
+      "graph_evictions": 0,
+      "hot_state_bytes": 69375560,
+      "objective_cache_bytes": 3848622
+    }
+  },
+  "policy_stats": {}
+}

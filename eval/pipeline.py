@@ -73,7 +73,10 @@ def run_evaluation(
     if policy is None and any(name.startswith("rl_") and name not in factories for name in spec.algorithms):
         policy = EvaluationPolicy.from_spec(spec)
     if getattr(policy, "requires_episode_context", False):
-        EvaluationPolicy.validate_context_algorithms(spec.algorithms, spec.reward_function)
+        from core.cy_episode_context import BEST_SO_FAR
+
+        EvaluationPolicy.validate_context_algorithms(
+            spec.algorithms, spec.reward_function, BEST_SO_FAR if spec.reward_function == "min_mori_cap" else None)
     if setup is None:
         setup = prepare_eval_setup(spec)
     setup.validate(spec)

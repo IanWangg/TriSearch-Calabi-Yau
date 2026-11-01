@@ -121,8 +121,8 @@ class EvaluationSpec:
         if "cyopt_ga" in self.algorithms and self.reward_function not in {"max_kcup", "min_mori_cap"}:
             raise ValueError("cyopt_ga supports max_kcup and min_mori_cap, objectives on 2-face triangulation classes.")
         if (set(self.algorithms) & value_search_names
-                and self.reward_function != "max_kcup"):
-            raise ValueError("Metric-value search currently supports only max_kcup, using natural log volume.")
+                and self.reward_function not in {"max_kcup", "min_mori_cap"}):
+            raise ValueError("Metric-value search supports only max_kcup and min_mori_cap.")
         from models.subcomplex_policy_config import validate_two_face_encoder_options
 
         validate_two_face_encoder_options(self.subcomplex_actor_type, self.two_face_encoder,

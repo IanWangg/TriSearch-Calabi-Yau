@@ -1,4 +1,4 @@
-"""Offline, query-aligned max_kcup comparisons; never rerun geometry to plot."""
+"""Offline, query-aligned CY objective comparisons; never rerun geometry to plot."""
 
 from __future__ import annotations
 
@@ -13,6 +13,10 @@ import numpy as np
 
 
 ALGORITHM_STYLES = {
+    "vanilla_befs": ("Vanilla BeFS", "#1f77b4", "--"),
+    "ga": ("GA (cyopt)", "#e377c2", "-."),
+    "rl_befs_incremental": ("RL + BeFS incremental", "#ff7f0e", "-"),
+    "rl_befs_best_so_far": ("RL + BeFS best_so_far", "#2ca02c", "-"),
     "random": ("Random", "#7f7f7f", "--"),
     "greedy": ("Greedy", "#bc8f00", "--"),
     "best_first": ("BeFS", "#1f77b4", "--"),
@@ -29,7 +33,7 @@ EARLY_STOP_REASONS = {"no_neighbors", "no_unvisited_neighbors", "frontier_exhaus
                       "dna_space_singleton", "no_feasible_offspring"}
 
 COMPARISON_FIELDS = ("num_polytopes", "num_starts", "h11", "objective_budget", "seed",
-                     "reward_function", "beam_width", "policy_proposal_count", "value_discount", "two_face_state")
+                     "reward_function", "mori_cap_backend", "beam_width", "policy_proposal_count", "value_discount", "two_face_state")
 
 TWO_FACE_METRIC_REL_TOL = 1e-6
 
@@ -62,6 +66,14 @@ def _key(row):
 def _positive(value):
     if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
         raise ValueError(f"Expected finite positive max_kcup volume, got {value!r}.")
+    return float(value)
+
+
+def _objective(value, objective_name):
+    if objective_name == "max_kcup":
+        return _positive(value)
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0 or int(value) != value:
+        raise ValueError(f"Expected a finite nonnegative Mori cap extremal ray count, got {value!r}.")
     return float(value)
 
 
@@ -157,8 +169,11 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
     spec = {"two_face_state": False, **config["spec"]}
     if type(spec["two_face_state"]) is not bool:
         raise ValueError("Invalid two_face_state in evaluation results.")
-    if spec["reward_function"] != "max_kcup":
-        raise ValueError("Volume comparisons currently require reward_function=max_kcup.")
+    objective_name = spec["reward_function"]
+    if objective_name not in {"max_kcup", "min_mori_cap"}:
+        raise ValueError("Comparisons require reward_function=max_kcup or min_mori_cap.")
+    goal = "min" if objective_name == "min_mori_cap" else "max"
+    validate_objective = lambda value: _objective(value, objective_name)
     budget = spec["objective_budget"]
     data = ComparisonData(spec, config["setup_id"], {}, {},
                           config.get("policy", {}).get("checkpoint_sha256"))
@@ -166,7 +181,7 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
         key = _key(row)
         if key in data.rollouts:
             raise ValueError(f"Duplicate rollout: {key}.")
-        if row["objective_name"] != "max_kcup" or row["objective_goal"] != "max" or row["objective_budget"] != budget:
+        if row["objective_name"] != objective_name or row["objective_goal"] != goal or row["objective_budget"] != budget:
             raise ValueError(f"Inconsistent rollout objective/budget: {key}.")
         count = row["objective_queries"]
         if type(count) is not int or count < 0 or row["budget_overshoot"] != max(0, count - budget):
@@ -174,8 +189,8 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
         reason = row["termination_reason"]
         if reason not in EARLY_STOP_REASONS | {"budget_exhausted"} or (count < budget and reason not in EARLY_STOP_REASONS):
             raise ValueError(f"Invalid early termination: {key}.")
-        _positive(row["initial_objective"])
-        _positive(row["best_objective"])
+        validate_objective(row["initial_objective"])
+        validate_objective(row["best_objective"])
         if spec["two_face_state"]:
             _evaluation_key(row, "initial_evaluation_state_key")
             _evaluation_key(row, "best_evaluation_state_key")
@@ -185,7 +200,7 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
     if summary["num_rollouts"] != len(data.rollouts):
         raise ValueError("Summary rollout count differs from logs.")
     counts = dict.fromkeys(data.rollouts, -1)
-    best = dict.fromkeys(data.rollouts, -math.inf)
+    best = dict.fromkeys(data.rollouts, math.inf if goal == "min" else -math.inf)
     best_keys = {}
     best_evaluation_keys = {}
     for event in _read_jsonl(run_dir / "queries.jsonl"):
@@ -195,15 +210,15 @@ def read_comparison(run_dir: str | Path) -> ComparisonData:
             raise ValueError(f"Unknown rollout or nonconsecutive query index: {key}, q={q}.")
         if event["status"] != "ok" or event["is_initial"] != (q == 0):
             raise ValueError(f"Failed or invalid query: {key}, q={q}.")
-        value = _positive(event["objective"])
+        value = validate_objective(event["objective"])
         if spec["two_face_state"]:
             evaluation_key = _evaluation_key(event, "evaluation_state_key")
             _record_evaluation_objective(data, evaluation_key, value)
-        if value > best[key]:
+        if (value < best[key] if goal == "min" else value > best[key]):
             best[key], best_keys[key] = value, event["state_key"]
             if spec["two_face_state"]:
                 best_evaluation_keys[key] = evaluation_key
-        if not math.isclose(_positive(event["best_objective"]), best[key], rel_tol=1e-9):
+        if not math.isclose(validate_objective(event["best_objective"]), best[key], rel_tol=1e-9):
             raise ValueError(f"Inconsistent cumulative best: {key}, q={q}.")
         row = data.rollouts[key]
         if q == 0 and (event["state_key"] != row["initial_state_key"] or not math.isclose(
@@ -271,6 +286,38 @@ def combine_comparisons(run_dirs) -> ComparisonData:
     return combined
 
 
+def combine_labeled_comparisons(labeled_run_dirs) -> ComparisonData:
+    """Explicitly compare different checkpoints, one named method per validated run.
+
+    Ordinary combine_comparisons retains its strict same-checkpoint contract.
+    Labels and checkpoint hashes are persisted by plot_evaluation below.
+    """
+    combined = None
+    first = None
+    for label, path in labeled_run_dirs.items():
+        child = read_comparison(path)
+        if len(child.spec["algorithms"]) != 1:
+            raise ValueError("Labeled comparisons require exactly one algorithm per source run.")
+        if combined is None:
+            first = child
+            combined = ComparisonData({**child.spec, "algorithms": []}, child.setup_id, {}, {})
+        if child.setup_id != first.setup_id or any(
+                child.spec.get(field) != first.spec.get(field) for field in COMPARISON_FIELDS):
+            raise ValueError("Labeled comparisons require the same setup and scientific settings.")
+        if child.spec.get("skip_insufficient_starts", False) != first.spec.get("skip_insufficient_starts", False):
+            raise ValueError("Labeled comparisons require the same start selection policy.")
+        combined.spec["algorithms"].append(label)
+        for (_, polytope, start), row in child.rollouts.items():
+            key = label, polytope, start
+            combined.rollouts[key] = {**row, "algorithm": label}
+            combined.curves[key] = child.curves[row["algorithm"], polytope, start]
+        _merge_evaluation_objectives(combined, child)
+    if combined is None:
+        raise ValueError("At least one labeled run is required.")
+    _check_pairs(combined)
+    return combined
+
+
 def comparison_statistics(data: ComparisonData):
     """Median/IQR of raw best volumes, within each polytope and across all starts."""
     per_polytope, overall = {}, {}
@@ -298,13 +345,17 @@ def _write_csv(path, rows):
         writer.writerows(rows)
 
 
-def plot_evaluation(run_dir: str | Path, output_dir: str | Path | None = None, *, additional_run_dirs=()) -> Path:
+def plot_evaluation(run_dir: str | Path, output_dir: str | Path | None = None, *, additional_run_dirs=(), labeled_run_dirs=None) -> Path:
     """Generate deterministic derived artifacts; original evaluation logs are read only."""
     run_dir = Path(run_dir).expanduser().resolve()
     run_dirs = [run_dir, *(Path(path).expanduser().resolve() for path in additional_run_dirs)]
     if len(run_dirs) > 1 and output_dir is None:
         raise ValueError("Combined comparisons require a separate output_dir.")
-    data = combine_comparisons(run_dirs)
+    if labeled_run_dirs:
+        if output_dir is None or additional_run_dirs:
+            raise ValueError("Labeled comparisons require a separate output_dir and no additional_run_dirs.")
+        run_dirs = [Path(path).expanduser().resolve() for path in labeled_run_dirs.values()]
+    data = combine_labeled_comparisons(labeled_run_dirs) if labeled_run_dirs else combine_comparisons(run_dirs)
     per_polytope, overall = comparison_statistics(data)
     output_dir = Path(output_dir).expanduser().resolve() if output_dir else run_dir / "plots"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -316,6 +367,9 @@ def plot_evaluation(run_dir: str | Path, output_dir: str | Path | None = None, *
     from matplotlib.ticker import MaxNLocator
 
     spec = data.spec
+    mori = spec["reward_function"] == "min_mori_cap"
+    metric_label = "Best Mori cap extremal ray count" if mori else "Best CY volume (log10 scale)"
+    artifact_metric = "mori_cap" if mori else "volume"
     algorithms = spec["algorithms"]
     budget = spec["objective_budget"]
     queries = np.arange(budget + 1)
@@ -341,12 +395,15 @@ def plot_evaluation(run_dir: str | Path, output_dir: str | Path | None = None, *
                 ax.step(queries, stats["median"], where="post", label=label, color=color, ls=linestyle,
                         marker="o" if budget == 0 else None)
                 ax.fill_between(queries, stats["q25"], stats["q75"], step="post", color=color, alpha=0.12)
-            ax.set(title=f"Polytope {polytope}", xlabel="Logical objective queries", ylabel="Best CY volume (log10 scale)")
-            ax.set_yscale("log", base=10)
+            ax.set(title=f"Polytope {polytope}", xlabel="Logical objective queries", ylabel=metric_label)
+            if not mori:
+                ax.set_yscale("log", base=10)
+            else:
+                ax.yaxis.set_major_locator(MaxNLocator(integer=True))
             lower = min(per_polytope[name, polytope]["q25"].min() for name in algorithms)
             upper = max(per_polytope[name, polytope]["q75"].max() for name in algorithms)
             # Do not magnify solver noise when all plotted volumes are nearly equal.
-            if upper / lower < 1.01:
+            if not mori and upper / lower < 1.01:
                 ax.set_ylim(lower / 1.05, upper * 1.05)
             ax.xaxis.set_major_locator(MaxNLocator(integer=True))
             if budget == 0:
@@ -359,7 +416,7 @@ def plot_evaluation(run_dir: str | Path, output_dir: str | Path | None = None, *
         figure.suptitle(title + "\nMedian and interquartile range across starts")
         figure.legend(*axes.flat[0].get_legend_handles_labels(), loc="lower center", ncol=legend_columns, frameon=False)
         figure.tight_layout(rect=(0, legend_height / height, 1, 1 - 0.65 / height))
-        save(figure, "best_volume_by_polytope")
+        save(figure, f"best_{artifact_metric}_by_polytope")
 
         figure, ax = plt.subplots(figsize=(9, 5.5))
         for algorithm in algorithms:
@@ -370,11 +427,14 @@ def plot_evaluation(run_dir: str | Path, output_dir: str | Path | None = None, *
             ax.fill_between(queries, stats["q25"], stats["q75"],
                             step="post", color=color, alpha=0.12)
         ax.set(title=title + "\nMedian and interquartile range across all starts",
-               xlabel="Logical objective queries", ylabel="Best CY volume (log10 scale)")
-        ax.set_yscale("log", base=10)
+               xlabel="Logical objective queries", ylabel=metric_label)
+        if not mori:
+            ax.set_yscale("log", base=10)
+        else:
+            ax.yaxis.set_major_locator(MaxNLocator(integer=True))
         lower = min(overall[name]["q25"].min() for name in algorithms)
         upper = max(overall[name]["q75"].max() for name in algorithms)
-        if upper / lower < 1.01:
+        if not mori and upper / lower < 1.01:
             ax.set_ylim(lower / 1.05, upper * 1.05)
         ax.grid(alpha=0.2)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
@@ -384,7 +444,7 @@ def plot_evaluation(run_dir: str | Path, output_dir: str | Path | None = None, *
             ax.set_xlim(0, budget)
         ax.legend(frameon=False, fontsize=9)
         figure.tight_layout()
-        save(figure, "best_volume_overall")
+        save(figure, f"best_{artifact_metric}_overall")
 
         height = 3.8 * polytope_rows + 0.7
         figure, axes = plt.subplots(polytope_rows, columns, figsize=(9 if columns == 1 else 14, height), squeeze=False)
@@ -399,9 +459,9 @@ def plot_evaluation(run_dir: str | Path, output_dir: str | Path | None = None, *
                            color=styles[algorithm][1], zorder=3)
             ax.set_yticks(range(1, len(algorithms) + 1), [styles[name][0] for name in algorithms])
             ax.invert_yaxis()
-            ax.set(title=f"Polytope {polytope}", xlabel=f"Best CY volume within {budget} queries", xscale="log")
+            ax.set(title=f"Polytope {polytope}", xlabel=f"{metric_label} within {budget} queries", xscale="linear" if mori else "log")
             lower, upper = np.min(values), np.max(values)
-            if upper / lower < 1.01:
+            if not mori and upper / lower < 1.01:
                 ax.set_xlim(lower / 1.05, upper * 1.05)
             ax.grid(axis="x", alpha=0.2)
         for ax in list(axes.flat)[len(data.polytopes):]:
@@ -444,8 +504,12 @@ def plot_evaluation(run_dir: str | Path, output_dir: str | Path | None = None, *
         "budget_endpoint": "best among query_index <= objective_budget",
         "early_stop": "carry forward only successfully terminated rollouts",
         "polytope_curve": "median and 25th/75th percentiles across starts",
-        "overall_curve": "median and 25th/75th percentiles of raw best volume across all starts; equal start counts per polytope",
-        "volume_axis": "base 10 logarithmic scale; tick values are raw CY volumes",
+        "overall_curve": "median and 25th/75th percentiles of raw best objective across all starts; equal start counts per polytope",
+        "objective_goal": "min" if mori else "max",
+        "labeled_sources": ({label: {"run_dir": str(Path(path).resolve()),
+            "policy": json.loads((Path(path) / "config.json").read_text()).get("policy")}
+            for label, path in labeled_run_dirs.items()} if labeled_run_dirs else None),
+        "volume_axis": "linear extremal ray count" if mori else "base 10 logarithmic scale; tick values are raw CY volumes",
         "near_constant_volume_axes": "5% padding if displayed max/min < 1.01; underlying values unchanged",
         "numpy_version": np.__version__, "matplotlib_version": matplotlib.__version__,
     }, indent=2, allow_nan=False) + "\n", encoding="utf-8")

@@ -9,7 +9,7 @@ import math
 
 import numpy as np
 
-from core.cy_episode_context import EpisodeContext
+from core.cy_episode_context import BEST_SO_FAR, EpisodeContext, MinimizationEpisodeContext
 from eval.algorithm.base import SearchNode
 from eval.algorithm.rl import RLAlgorithm
 from eval.policy import PolicyScorer
@@ -48,6 +48,14 @@ class _Expansion:
     values: dict = field(default_factory=dict)
 
 
+def _episode_context(policy, session, objective):
+    factory = getattr(policy, "episode_context", None)
+    if factory is not None:
+        return factory(objective, session.best_value, session.remaining_budget)
+    kind = MinimizationEpisodeContext if session.objective_name == "min_mori_cap" else EpisodeContext
+    return kind(objective, session.best_value, session.remaining_budget)
+
+
 def _prepare_layer(trajectories, engine, policy, search_observer=None):
     """Batch free neighbor enumeration/scoring, then admit a budgeted prefix.
 
@@ -66,10 +74,8 @@ def _prepare_layer(trajectories, engine, policy, search_observer=None):
     if scored:
         score_options = {}
         if getattr(policy, "requires_episode_context", False):
-            score_options["episode_contexts"] = [EpisodeContext(
-                item.parent.node.objective, item.trajectory.session.best_value,
-                item.trajectory.session.remaining_budget,
-            ) for item in scored]
+            score_options["episode_contexts"] = [_episode_context(
+                policy, item.trajectory.session, item.parent.node.objective) for item in scored]
         probabilities = policy.score_actions([item.parent.node.state for item in scored],
                                              [item.actions for item in scored], **score_options)
         if len(probabilities) != len(scored):
@@ -137,8 +143,7 @@ def _refresh_context_frontiers(trajectories, next_frontiers, policy, search_obse
             trajectory.pending_frontier.clear()
         for index, item in enumerate(children):
             entries.append((trajectory, index, item, item.node.query_index in new_queries))
-            contexts.append(EpisodeContext(item.node.objective, trajectory.session.best_value,
-                                           trajectory.session.remaining_budget))
+            contexts.append(_episode_context(policy, trajectory.session, item.node.objective))
     if not entries:
         return
     values = policy.score_values([item.node.state for _, _, item, _ in entries], episode_contexts=contexts)
@@ -146,7 +151,9 @@ def _refresh_context_frontiers(trajectories, next_frontiers, policy, search_obse
         raise ValueError("Policy returned the wrong number of critic values.")
     for (trajectory, index, item, is_new), context, value in zip(entries, contexts, values):
         value = float(value)
-        score = math.log(context.best_volume) + trajectory.algorithm.value_discount * value
+        session = trajectory.session
+        metric = -session.best_value if session.objective_name == "min_mori_cap" else math.log(session.best_value)
+        score = metric + trajectory.algorithm.value_discount * value
         if not math.isfinite(value) or not math.isfinite(score):
             raise ValueError("Nonfinite contextual critic value or RL search score.")
         next_frontiers[id(trajectory)][index] = _ScoredNode(item.node, score, item.parent_key)
@@ -157,7 +164,8 @@ def _refresh_context_frontiers(trajectories, next_frontiers, policy, search_obse
                 "parent_key": item.parent_key, "state_key": item.node.state.key,
                 "search_key": session.state_key(item.node.state), "query_index": item.node.query_index,
                 "objective": item.node.objective, "critic": value, "score": score,
-                "best_objective": context.best_volume, "remaining_budget": context.remaining_steps,
+                "best_objective": session.best_value, "remaining_budget": session.remaining_budget,
+                "context_remaining_steps": context.remaining_steps,
             })
 
 
@@ -192,7 +200,9 @@ def run_batched_rollouts(
     contextual = bool(getattr(policy, "requires_episode_context", False))
     if contextual:
         from eval.policy import EvaluationPolicy
-        EvaluationPolicy.validate_context_algorithms([algorithm.name for algorithm in algorithms], objective_name)
+        EvaluationPolicy.validate_context_algorithms(
+            [algorithm.name for algorithm in algorithms], objective_name,
+            BEST_SO_FAR if objective_name == "min_mori_cap" else None)
     if not initial_states:
         return []
     reward = reward_function if reward_function is not None else get_reward(objective_name)

@@ -1,0 +1,5 @@
+algorithm,num_rollouts,median_best_at_budget,q25_best_at_budget,q75_best_at_budget,objective_queries,budget_overshoot,early_stops
+rl_befs_incremental,25,26.0,25.0,28.0,3208,8,0
+rl_befs_best_so_far,25,26.0,25.0,31.0,3204,4,0
+vanilla_befs,25,28.0,28.0,30.0,3342,142,0
+ga,25,24.0,23.0,29.0,3200,0,0

@@ -1,0 +1,24 @@
+{
+  "num_polytopes": 5,
+  "h11": 30,
+  "num_starts": 5,
+  "objective_budget": 1000,
+  "seed": 0,
+  "reward_function": "min_mori_cap",
+  "mori_cap_backend": "mosek",
+  "cache_states": true,
+  "runtime_cache_gb": 4,
+  "memory_budget_gb": 16,
+  "transition_num_workers": 4,
+  "transition_task_timeout_sec": 3600,
+  "force_cpu": true,
+  "two_face_state": false,
+  "beam_width": 4,
+  "policy_proposal_count": 4,
+  "value_discount": 1,
+  "hf_revision": "60c0e119a03608418df538191f65da3f43b5b819",
+  "skip_insufficient_starts": true,
+  "algorithms": [
+    "best_first"
+  ]
+}
