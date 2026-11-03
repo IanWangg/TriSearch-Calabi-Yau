@@ -124,7 +124,8 @@ class RLTunedBestFirst(RLValueBestFirst):
     """
 
     def __init__(self, policy_proposal_count: int = 4, value_discount: float = 0.9, *,
-                 proposal_mode: str = "actor", logp_coef: float = 0.0, widen_penalty: float | None = None):
+                 proposal_mode: str = "actor", logp_coef: float = 0.0, widen_penalty: float | None = None,
+                 proposal_seed: int | None = None):
         if proposal_mode not in ("actor", "random", "canonical"):
             raise ValueError("proposal_mode must be actor, random or canonical.")
         if not math.isfinite(logp_coef) or (widen_penalty is not None and not math.isfinite(widen_penalty)):
@@ -133,6 +134,9 @@ class RLTunedBestFirst(RLValueBestFirst):
         self.proposal_mode = proposal_mode
         self.logp_coef = logp_coef
         self.widen_penalty = widen_penalty
+        # Optional own RNG for random proposals, so repeats need no new setup seed.
+        self.proposal_seed = proposal_seed
+        self._rng = None if proposal_seed is None else np.random.default_rng(proposal_seed)
         # Keep actor logits for logging and logp_coef even when all neighbors are proposed.
         self.requires_policy = True
 
@@ -140,7 +144,7 @@ class RLTunedBestFirst(RLValueBestFirst):
         if self.proposal_mode == "actor":
             order = sorted(range(len(next_keys)), key=lambda i: (-log_probabilities[i], i))
         elif self.proposal_mode == "random":
-            order = [int(i) for i in rng.permutation(len(next_keys))]
+            order = [int(i) for i in (self._rng or rng).permutation(len(next_keys))]
         else:
             order = range(len(next_keys))
         selected, targets = [], set()
@@ -161,7 +165,7 @@ class RLTunedBestFirst(RLValueBestFirst):
     def describe(self):
         return dict(policy_proposal_count=self.proposal_count, value_discount=self.value_discount,
                     proposal_mode=self.proposal_mode, logp_coef=self.logp_coef,
-                    widen_penalty=self.widen_penalty)
+                    widen_penalty=self.widen_penalty, proposal_seed=self.proposal_seed)
 
 
 class RLMetricValueBeamSearch(RLValueBeamSearch):

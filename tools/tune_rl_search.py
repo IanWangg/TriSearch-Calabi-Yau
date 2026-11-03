@@ -135,6 +135,7 @@ def main(argv=None):
     parser.add_argument("--proposal_mode", choices=("actor", "random", "canonical"), default="actor")
     parser.add_argument("--logp_coef", type=float, default=0.0)
     parser.add_argument("--widen_penalty", type=float)
+    parser.add_argument("--proposal_seed", type=int, help="Own RNG seed for random proposals (repeats).")
     parser.add_argument("--plain_befs", action="store_true", help="Run plain best_first instead (ignores RL options).")
     parser.add_argument("--gpu_index", type=int, default=4)
     parser.add_argument("--force_cpu", action="store_true")
@@ -174,7 +175,8 @@ def main(argv=None):
     if not args.plain_befs:
         def factory():
             return RLTunedBestFirst(args.k, args.value_discount, proposal_mode=args.proposal_mode,
-                                    logp_coef=args.logp_coef, widen_penalty=args.widen_penalty)
+                                    logp_coef=args.logp_coef, widen_penalty=args.widen_penalty,
+                                    proposal_seed=args.proposal_seed)
         factories[algorithm] = factory
         variant.update(factory().describe())
     output_dir = Path(args.output_dir).resolve()
