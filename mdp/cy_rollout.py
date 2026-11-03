@@ -474,6 +474,8 @@ class CYRandomRolloutEngine:
             )
         self.base_states = dict(base_states or {})
         self.initial_states = list(initial_states or [])
+        self._initial_state_h11_by_polytope: Optional[Dict[int, int]] = None
+        self._initial_state_weight_by_h11: Optional[Dict[int, float]] = None
         self.polytope_by_index = dict(polytope_by_index or {})
         self.vertices_by_polytope = dict(vertices_by_polytope or {})
         self.include_points_interior_to_facets = bool(include_points_interior_to_facets)
@@ -859,8 +861,54 @@ class CYRandomRolloutEngine:
         pool = self.initial_states if initial_state_pool is None else list(initial_state_pool)
         if not pool:
             raise ValueError("Cannot sample from an empty initial state pool.")
-        indices = rng.integers(0, len(pool), size=int(num_states))
+        if self._initial_state_weight_by_h11 is None:
+            indices = rng.integers(0, len(pool), size=int(num_states))
+        else:
+            indices = rng.choice(len(pool), size=int(num_states), p=self.initial_state_probabilities(pool))
         return [pool[int(idx)] for idx in indices]
+
+    def set_initial_state_h11_weights(
+        self,
+        h11_by_polytope: Optional[Mapping[int, int]],
+        weight_by_h11: Optional[Mapping[int, float]],
+    ) -> None:
+        """Sample initial states so each h11 gets the given share of resets.
+
+        Within one h11, states are sampled uniformly. None restores uniform
+        sampling over all states.
+        """
+        if (h11_by_polytope is None) != (weight_by_h11 is None):
+            raise ValueError("h11_by_polytope and weight_by_h11 must be given together.")
+        if weight_by_h11 is not None:
+            if not weight_by_h11 or any(float(w) < 0 or not np.isfinite(float(w)) for w in weight_by_h11.values()):
+                raise ValueError("h11 sampling weights must be finite and non-negative.")
+            if sum(float(w) for w in weight_by_h11.values()) <= 0:
+                raise ValueError("h11 sampling weights must have a positive sum.")
+        self._initial_state_h11_by_polytope = (
+            None if h11_by_polytope is None else {int(k): int(v) for k, v in h11_by_polytope.items()})
+        self._initial_state_weight_by_h11 = (
+            None if weight_by_h11 is None else {int(k): float(v) for k, v in weight_by_h11.items()})
+
+    def initial_state_probabilities(self, pool: Sequence[Any]) -> np.ndarray:
+        if self._initial_state_weight_by_h11 is None or self._initial_state_h11_by_polytope is None:
+            return np.full(len(pool), 1.0 / len(pool))
+        h11_values = []
+        for state in pool:
+            polytope_index = int(state.point_config_index)
+            if polytope_index not in self._initial_state_h11_by_polytope:
+                raise KeyError(f"No h11 recorded for polytope {polytope_index}.")
+            h11 = self._initial_state_h11_by_polytope[polytope_index]
+            if h11 not in self._initial_state_weight_by_h11:
+                raise KeyError(f"No sampling weight for h11={h11}.")
+            h11_values.append(h11)
+        counts: Dict[int, int] = {}
+        for h11 in h11_values:
+            counts[h11] = counts.get(h11, 0) + 1
+        weights = np.asarray([self._initial_state_weight_by_h11[h11] / counts[h11] for h11 in h11_values])
+        total = float(weights.sum())
+        if total <= 0:
+            raise ValueError("Initial state pool has zero total sampling weight.")
+        return weights / total
 
     def graph_node_count(self) -> int:
         return len(self._discovered_keys)

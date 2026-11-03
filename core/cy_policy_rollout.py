@@ -256,6 +256,13 @@ def collect_policy_rollout(
     )
     objective_first_episode_active = [True for _ in states]
     current_objective_values = list(objective_initial_values) if objective_initial_values is not None else None
+    # Step rewards come from recorded objectives when a batched query is available.
+    # from_objectives(V, V') equals reward(state, next_state) for every reward,
+    # so this changes only how values are computed, not the rewards.
+    objective_step_mode = objective_function is not None and (
+        training_reward_mode == INCREMENTAL
+        or (training_reward_mode == STEP_LOG_VOLUME and batch_objective_function is not None)
+    )
     trajectory_transforms = None
     if bool(vertex_aug_enable):
         trajectory_transforms = sample_cy_trajectory_transforms(
@@ -304,7 +311,7 @@ def collect_policy_rollout(
                 batch_objective_function=batch_objective_function,
                 current_objective_values=objective_final_values,
             )
-        elif training_reward_mode == INCREMENTAL and objective_function is not None:
+        elif objective_step_mode:
             step_options = dict(objective_function=objective_function,
                                 batch_objective_function=batch_objective_function,
                                 current_objective_values=current_objective_values)
@@ -384,7 +391,7 @@ def collect_policy_rollout(
                     )
                 if step_result.dones[idx]:
                     objective_first_episode_active[idx] = False
-            if training_reward_mode == INCREMENTAL:
+            if objective_step_mode:
                 current_objective_values = query_objective_values(
                     step_result.next_states, objective_function, batch_objective_function)
         total_intrinsic_bonus += float(sum(intrinsic_bonus))

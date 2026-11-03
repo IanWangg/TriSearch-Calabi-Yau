@@ -161,6 +161,9 @@ def build_iteration_metrics_record(
             "clip_ratio": float(train_stats.clip_ratio),
             "num_samples": int(train_stats.num_samples),
             "num_valid_action_samples": int(train_stats.num_valid_action_samples),
+            "approx_kl": float(train_stats.approx_kl),
+            "num_minibatch_updates": int(train_stats.num_minibatch_updates),
+            "early_stopped": bool(train_stats.early_stopped),
         },
         "timing": {
             "rollout_sec": float(rollout_sec),
