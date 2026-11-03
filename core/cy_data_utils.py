@@ -636,3 +636,71 @@ def resolve_policy_in_channels(
             f"got {resolved_in_channels}, expected {dataset_coordinate_dim}."
         )
     return resolved_in_channels
+
+
+def combine_dataset_rows(row_groups: Sequence[Sequence[dict]], *, label: str = "dataset") -> List[dict]:
+    """Concatenate rows from several files; polytope_index must stay unique."""
+    combined: List[dict] = []
+    seen: Dict[int, int] = {}
+    for group_index, rows in enumerate(row_groups):
+        for row in rows:
+            polytope_index = int(row["polytope_index"])
+            if polytope_index in seen and seen[polytope_index] != group_index:
+                raise ValueError(
+                    f"{label}: polytope_index={polytope_index} appears in more than one file."
+                )
+            seen[polytope_index] = group_index
+            combined.append(row)
+    return combined
+
+
+def split_rows_with_eval_dataset(
+    train_rows: Sequence[dict],
+    eval_rows: Sequence[dict],
+) -> CYDatasetSplit:
+    """Use a separate evaluation file instead of holding out training polytopes."""
+    train_polytope_indices = sorted({int(row["polytope_index"]) for row in train_rows})
+    eval_polytope_indices = sorted({int(row["polytope_index"]) for row in eval_rows})
+    if not train_polytope_indices or not eval_polytope_indices:
+        raise ValueError("Train and eval datasets must both be non-empty.")
+    overlap = set(train_polytope_indices) & set(eval_polytope_indices)
+    if overlap:
+        raise ValueError(
+            f"Train and eval datasets share polytope_index values: {sorted(overlap)[:10]}"
+        )
+    return CYDatasetSplit(
+        train_rows=list(train_rows),
+        eval_rows=list(eval_rows),
+        train_polytope_indices=train_polytope_indices,
+        eval_polytope_indices=eval_polytope_indices,
+    )
+
+
+def parse_h11_sampling_weights(text: str | None) -> Dict[int, float] | None:
+    """Parse '15=3,20=1' into {15: 3.0, 20: 1.0}."""
+    if text is None or not str(text).strip():
+        return None
+    weights: Dict[int, float] = {}
+    for part in str(text).split(","):
+        key, sep, value = part.partition("=")
+        if not sep:
+            raise ValueError(f"Invalid h11 sampling weight '{part}'; expected h11=weight.")
+        h11 = int(key.strip())
+        if h11 in weights:
+            raise ValueError(f"Duplicate h11 sampling weight for h11={h11}.")
+        weight = float(value.strip())
+        if not np.isfinite(weight) or weight < 0:
+            raise ValueError(f"h11 sampling weight must be finite and non-negative: '{part}'.")
+        weights[h11] = weight
+    if sum(weights.values()) <= 0:
+        raise ValueError("h11 sampling weights must have a positive sum.")
+    return weights
+
+
+def h11_by_polytope_index(rows: Sequence[dict]) -> Dict[int, int]:
+    result: Dict[int, int] = {}
+    for row in rows:
+        if "h11" not in row:
+            raise ValueError(f"Row polytope_index={row.get('polytope_index')} has no h11 field.")
+        result[int(row["polytope_index"])] = int(row["h11"])
+    return result

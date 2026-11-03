@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 import numpy as np
 import torch
 
-from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME
+from core.cy_episode_context import BEST_SO_FAR_LOG_VOLUME, STEP_LOG_VOLUME
 from core.cy_managed_runtime import managed_rollout_runtime
 from core.cy_policy_rollout import collect_policy_rollout
 from core.cy_runtime_utils import resolve_training_device, set_seeds
@@ -42,7 +42,7 @@ def run_mode(args, config, rows, mode, device):
         register_engine(engine)
         policy = build_subcomplex_agent(model_type="egnn", subcomplex_actor_type="two_face_deep_sets",
             in_channels=4, hidden_channels=64, out_channels=64, num_layers=3, device=str(device),
-            training_reward_mode=BEST_SO_FAR_LOG_VOLUME, episode_horizon=args.rollout_length).eval()
+            training_reward_mode=args.training_reward_mode, episode_horizon=args.rollout_length).eval()
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         before = pool.stats
@@ -53,7 +53,7 @@ def run_mode(args, config, rows, mode, device):
             transition_pool=pool, transition_mp_chunksize=1, transition_mp_min_batch=1,
             store_buffer=True, report_every=0, label=mode, objective_function=get_objective("max_kcup", reward=reward),
             batch_objective_function=(lambda states: engine.objective_values(states, "max_kcup")) if mode == "batch" else None,
-            objective_name="max_kcup", objective_goal="max", training_reward_mode=BEST_SO_FAR_LOG_VOLUME)
+            objective_name="max_kcup", objective_goal="max", training_reward_mode=args.training_reward_mode)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         elapsed = time.perf_counter() - started
@@ -61,7 +61,8 @@ def run_mode(args, config, rows, mode, device):
         buffer = summary.rollout_buffer
         result = dict(mode=mode, rollout_sec=elapsed, objective_query_sec=summary.objective_query_sec,
             candidate_expand_sec=summary.candidate_expand_sec, transition_apply_sec=summary.transition_apply_sec,
-            environment_steps=sum(summary.episode_lengths), model_config=policy.model_config,
+            environment_steps=(sum(summary.episode_lengths) if summary.episode_lengths is not None
+                               else args.num_states * args.rollout_length), model_config=policy.model_config,
             initial_volumes=summary.objective_initial_values, best_volumes=summary.objective_best_values,
             final_volumes=summary.objective_final_values, final_keys=[state.key for state in summary.final_states],
             actions=[step.tolist() for step in buffer.action_index_buffer],
@@ -86,6 +87,9 @@ def main():
     parser.add_argument("--gpu_index", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force_cpu", action="store_true")
+    parser.add_argument("--training_reward_mode", choices=(BEST_SO_FAR_LOG_VOLUME, STEP_LOG_VOLUME),
+                        default=BEST_SO_FAR_LOG_VOLUME,
+                        help="step_log_volume compares the serial per-step reward path with the batched one.")
     args = parser.parse_args()
     if min(args.num_states, args.rollout_length, args.max_rows, args.workers) <= 0:
         parser.error("State, step, row and worker counts must be positive.")
@@ -93,7 +97,7 @@ def main():
     if not output.is_relative_to(ROOT):
         parser.error("output_dir must be inside the repository.")
     output.mkdir(parents=True, exist_ok=False)
-    config = training_args(["--training_reward_mode", BEST_SO_FAR_LOG_VOLUME,
+    config = training_args(["--training_reward_mode", args.training_reward_mode,
         "--subcomplex_actor_type", "two_face_deep_sets", "--neighbor_mode", "two_neighbors",
         "--reward_function", "max_kcup", "--no-vertex_aug_enable", "--no-include_points_interior_to_facets",
         "--use_multiprocessing", "--transition_num_workers", str(args.workers),

@@ -253,7 +253,10 @@ def train_policy_from_rollout(
     max_grad_norm: float,
     max_graph_size: int | None = None,
     memory_guard=None,
+    target_kl: float | None = None,
 ) -> PPOTrainStats:
+    if target_kl is not None and not float(target_kl) > 0:
+        raise ValueError("target_kl must be positive when given.")
     if prepared_rollout.observation_kind != policy_observation_kind(policy):
         raise ValueError("PPO rollout observation schema does not match the policy.")
     if prepared_rollout.data_buffer_list is not None:
@@ -297,9 +300,15 @@ def train_policy_from_rollout(
     total_policy_weight = 0
     total_clip_count = 0.0
     total_valid_action_samples = 0
+    total_kl_sum = 0.0
+    total_kl_count = 0
+    num_minibatch_updates = 0
+    early_stopped = False
 
     policy.train()
     for _epoch in range(int(num_epochs)):
+        if early_stopped:
+            break
         permutation = [sample_indices[i] for i in torch.randperm(num_samples).tolist()]
         for start in range(0, num_samples, int(batch_size)):
             if memory_guard is not None:
@@ -322,6 +331,12 @@ def train_policy_from_rollout(
             )
             optimizer.zero_grad(set_to_none=True)
             logical_loss = 0.0
+            batch_kl_sum = 0.0
+            batch_kl_count = 0
+            batch_value_loss_sum = 0.0
+            batch_policy_loss_sum = 0.0
+            batch_entropy_loss_sum = 0.0
+            batch_clip_count = 0.0
             for positions in policy_data_chunks(mini_data, max_graph_size=max_graph_size, policy=policy):
                 if memory_guard is not None:
                     memory_guard()
@@ -344,14 +359,33 @@ def train_policy_from_rollout(
                 loss = policy_loss + float(value_coef) * value_loss - float(entropy_coef) * entropy_loss
                 loss.backward()
                 logical_loss += float(loss.detach().item())
-                total_value_loss_sum += float(value_loss.detach().item()) * batch_count
-                total_policy_loss_sum += float(policy_loss.detach().item()) * actionable_count
-                total_entropy_loss_sum += float(entropy_loss.detach().item()) * actionable_count
-                total_clip_count += float((torch.abs(ratio.detach() - 1.0) > float(clip_coef)).sum().item())
+                batch_value_loss_sum += float(value_loss.detach().item()) * batch_count
+                batch_policy_loss_sum += float(policy_loss.detach().item()) * actionable_count
+                batch_entropy_loss_sum += float(entropy_loss.detach().item()) * actionable_count
+                batch_clip_count += float((torch.abs(ratio.detach() - 1.0) > float(clip_coef)).sum().item())
+                with torch.no_grad():
+                    log_ratio = torch.log(ratio.detach().clamp_min(1e-12))
+                    # k3 estimator of KL(old || new); non-negative per sample.
+                    batch_kl_sum += float(((ratio.detach() - 1.0) - log_ratio).sum().item())
+                    batch_kl_count += int(ratio.numel())
                 del evaluation, value_estimate, loss, policy_loss, value_loss, entropy_loss, ratio, unclipped, clipped
 
+            batch_kl = batch_kl_sum / max(1, batch_kl_count)
+            if target_kl is not None and batch_kl > 1.5 * float(target_kl):
+                # The policy already moved too far from the rollout policy. Drop
+                # this minibatch's gradient and stop all remaining epochs.
+                optimizer.zero_grad(set_to_none=True)
+                early_stopped = True
+                break
+            total_kl_sum += batch_kl_sum
+            total_value_loss_sum += batch_value_loss_sum
+            total_policy_loss_sum += batch_policy_loss_sum
+            total_entropy_loss_sum += batch_entropy_loss_sum
+            total_clip_count += batch_clip_count
+            total_kl_count += batch_kl_count
             nn.utils.clip_grad_norm_(policy.parameters(), float(max_grad_norm))
             optimizer.step()
+            num_minibatch_updates += 1
             total_loss_sum += logical_loss * batch_count
             total_value_weight += batch_count
             total_policy_weight += actionable_count
@@ -372,4 +406,7 @@ def train_policy_from_rollout(
         clip_ratio=clip_ratio,
         num_samples=num_samples,
         num_valid_action_samples=int(valid_mask_flat.sum().item()),
+        approx_kl=total_kl_sum / max(1, total_kl_count),
+        num_minibatch_updates=num_minibatch_updates,
+        early_stopped=early_stopped,
     )

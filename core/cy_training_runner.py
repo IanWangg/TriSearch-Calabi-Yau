@@ -26,7 +26,11 @@ from core.cy_data_utils import (
     mean_vertex_count,
     prune_cy_data_tensor_caches,
     resolve_policy_in_channels,
+    combine_dataset_rows,
+    h11_by_polytope_index,
+    parse_h11_sampling_weights,
     split_rows_by_vertex_count,
+    split_rows_with_eval_dataset,
 )
 from core.cy_policy_rollout_utils import (
     collect_policy_rollout,
@@ -115,6 +119,22 @@ def maybe_filter_initial_state_pool(
         raise ValueError(f"{label} initial state pool is empty after filtering.")
     return filtered_pool
 
+def load_dataset_rows(paths: Sequence[str] | str, *, max_rows: int | None, label: str) -> List[dict]:
+    path_list = [paths] if isinstance(paths, str) else list(paths)
+    groups = []
+    remaining = None if max_rows is None else int(max_rows)
+    for raw_path in path_list:
+        if remaining is not None and remaining <= 0:
+            break
+        dataset_path = str(Path(raw_path).expanduser())
+        print(f"Loading CY {label} dataset from {dataset_path}")
+        group = load_cy_sample_rows(dataset_path, max_rows=remaining)
+        groups.append(group)
+        if remaining is not None:
+            remaining -= len(group)
+    return combine_dataset_rows(groups, label=label)
+
+
 def main(args: argparse.Namespace) -> None:
     old_handler = signal.getsignal(signal.SIGTERM)
 
@@ -190,14 +210,21 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
         f"interop={torch_thread_config['torch_num_interop_threads']}"
     )
 
-    dataset_path = str(Path(args.dataset_path).expanduser())
-    print(f"Loading CY dataset from {dataset_path}")
-    rows = load_cy_sample_rows(dataset_path, max_rows=args.max_rows)
-    dataset_coordinate_dim = infer_dataset_coordinate_dim(rows)
+    rows = load_dataset_rows(args.dataset_path, max_rows=args.max_rows, label="train")
+    eval_rows = (load_dataset_rows(args.eval_dataset_path, max_rows=None, label="eval")
+                 if args.eval_dataset_path else None)
+    dataset_coordinate_dim = infer_dataset_coordinate_dim(rows if eval_rows is None else [*rows, *eval_rows])
     resolved_in_channels = resolve_policy_in_channels(rows, args.in_channels)
     if args.observation_kind == "two_face" and resolved_in_channels != 4:
         raise ValueError("two_face_deep_sets training requires 4D max_kcup data.")
-    split = split_rows_by_vertex_count(rows, num_eval_polytopes=args.num_eval_polytopes)
+    if eval_rows is None:
+        split = split_rows_by_vertex_count(rows, num_eval_polytopes=args.num_eval_polytopes)
+    else:
+        split = split_rows_with_eval_dataset(rows, eval_rows)
+        del eval_rows
+    h11_sampling_weights = parse_h11_sampling_weights(args.h11_sampling_weights)
+    train_h11_by_polytope = (h11_by_polytope_index(split.train_rows)
+                             if h11_sampling_weights is not None else None)
     print(
         "Dataset split: "
         f"train_polytopes={len(split.train_polytope_indices)} "
@@ -244,6 +271,9 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
         transition_pool=transition_pool,
     )
     register_engine(train_engine)
+    if h11_sampling_weights is not None:
+        train_engine.set_initial_state_h11_weights(train_h11_by_polytope, h11_sampling_weights)
+        print(f"Using training h11 sampling weights: {h11_sampling_weights}")
     eval_engine = CYRandomRolloutEngine(
         collection=eval_collection,
         include_points_interior_to_facets=args.include_points_interior_to_facets,
@@ -422,7 +452,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                 objective_function=objective_function,
                 batch_objective_function=(
                     lambda states: train_engine.objective_values(states, args.reward_function)
-                ) if args.training_reward_mode in (*FINITE_EPISODE_MODES, INCREMENTAL) else None,
+                ) if args.reward_function is not None else None,
                 objective_name=args.reward_function,
                 objective_goal=objective_goal,
                 training_reward_mode=args.training_reward_mode,
@@ -485,6 +515,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                 num_epochs=int(args.num_epochs),
                 batch_size=int(args.batch_size),
                 clip_coef=float(args.clip_coef),
+                target_kl=None if args.target_kl is None else float(args.target_kl),
                 value_coef=float(args.value_coef),
                 entropy_coef=float(args.entropy_coef),
                 max_grad_norm=float(args.max_grad_norm),
@@ -522,7 +553,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                     objective_function=objective_function,
                     batch_objective_function=(
                         lambda states: eval_engine.objective_values(states, args.reward_function)
-                    ) if args.training_reward_mode in (*FINITE_EPISODE_MODES, INCREMENTAL) else None,
+                    ) if args.reward_function is not None else None,
                     objective_name=args.reward_function,
                     objective_goal=objective_goal,
                     training_reward_mode=args.training_reward_mode,
@@ -578,7 +609,10 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                 f"policy_loss={train_stats.policy_loss:.6f} "
                 f"value_loss={train_stats.value_loss:.6f} "
                 f"explained_variance={train_stats.explained_variance:.6f} "
-                f"clip_ratio={train_stats.clip_ratio:.6f}"
+                f"clip_ratio={train_stats.clip_ratio:.6f} "
+                f"approx_kl={train_stats.approx_kl:.6f} "
+                f"updates={train_stats.num_minibatch_updates}"
+                f"{' early_stopped' if train_stats.early_stopped else ''}"
             )
             print(
                 "System: "
@@ -666,6 +700,9 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
                     "train/entropy_loss": train_stats.entropy_loss,
                     "train/explained_variance": train_stats.explained_variance,
                     "train/clip_ratio": train_stats.clip_ratio,
+                    "train/approx_kl": train_stats.approx_kl,
+                    "train/num_minibatch_updates": train_stats.num_minibatch_updates,
+                    "train/early_stopped": float(train_stats.early_stopped),
                     "train/num_samples": train_stats.num_samples,
                     "train/num_valid_action_samples": train_stats.num_valid_action_samples,
                     "system/rss_gb": rss_gb,

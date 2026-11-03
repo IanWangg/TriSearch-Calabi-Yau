@@ -92,3 +92,4 @@ ckpt/runs/
 !/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/*/config.json
 !/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/*/summary.json
 !/eval/sweep/mori_cap_rl_befs_comparison_20261029/results/*/*/rollouts.jsonl
+data/cy/favorable_v1

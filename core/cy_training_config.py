@@ -25,7 +25,9 @@ from reward_functions import CY_VOLUME_REWARD_TRANSFORMS, MORI_CAP_BACKENDS, SUP
 
 @dataclass(frozen=True)
 class CYTrainingConfig:
-    dataset_path: str
+    dataset_path: List[str]
+    eval_dataset_path: List[str] | None
+    h11_sampling_weights: str | None
     max_rows: int | None
     include_points_interior_to_facets: bool
     neighbor_mode: str
@@ -43,6 +45,7 @@ class CYTrainingConfig:
     gae_lambda: float
     batch_size: int
     clip_coef: float
+    target_kl: float | None
     value_coef: float
     entropy_coef: float
     max_grad_norm: float
@@ -125,8 +128,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dataset_path",
         type=str,
-        default="./data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl",
-        help="Path to CY .samples.jsonl file.",
+        nargs="+",
+        default=["./data/cy/output_random_flip/cy_reflexive_dataset_random_flip.samples.jsonl"],
+        help="One or more CY .samples.jsonl files. polytope_index must be unique across files.",
+    )
+    parser.add_argument(
+        "--eval_dataset_path",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional separate evaluation .samples.jsonl files (for example a dev split). "
+            "When given, --num_eval_polytopes is ignored and no training polytopes are held out."
+        ),
+    )
+    parser.add_argument(
+        "--h11_sampling_weights",
+        type=str,
+        default=None,
+        help=(
+            "Optional training reset share per h11, for example '15=3,20=1'. Within one h11, "
+            "starts are uniform. Default: uniform over all training starts. Rows need an h11 field."
+        ),
     )
     parser.add_argument(
         "--max_rows",
@@ -192,6 +215,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gae_lambda", type=float, default=0.95)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--clip_coef", type=float, default=0.1)
+    parser.add_argument("--target_kl", type=float, default=None,
+                        help="Stop the PPO epochs of one iteration early when the approximate KL "
+                             "to the rollout policy exceeds this value. Default: no early stop.")
     parser.add_argument("--value_coef", type=float, default=0.5)
     parser.add_argument("--entropy_coef", type=float, default=0.001)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)

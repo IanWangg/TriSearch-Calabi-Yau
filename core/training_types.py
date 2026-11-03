@@ -157,3 +157,6 @@ class PPOTrainStats:
     clip_ratio: float
     num_samples: int
     num_valid_action_samples: int
+    approx_kl: float = 0.0
+    num_minibatch_updates: int = 0
+    early_stopped: bool = False
