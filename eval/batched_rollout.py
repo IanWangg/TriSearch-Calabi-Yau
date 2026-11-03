@@ -46,6 +46,7 @@ class _Expansion:
     selected_indices: list[int] = field(default_factory=list)
     states: dict = field(default_factory=dict)
     values: dict = field(default_factory=dict)
+    next_keys: list = field(default_factory=list)
 
 
 def _episode_context(policy, session, objective):
@@ -98,6 +99,7 @@ def _prepare_layer(trajectories, engine, policy, search_observer=None):
             continue
         next_keys = [trajectory.session.transition_key(item.parent.node.state, item.transitions[action])
                      for action in item.actions]
+        item.next_keys = next_keys
         item.selected_indices = trajectory.algorithm.propose(
             next_keys, item.log_probabilities, trajectory.seen, trajectory.session.rng, reserved,
         )
@@ -311,6 +313,20 @@ def run_batched_rollouts(
                                     })
                                 if algorithm.is_walk:
                                     session.move(item.parent.node, evaluated, queries_before)
+
+                        widen_penalty = getattr(algorithm, "widen_penalty", None)
+                        if (widen_penalty is not None and algorithm.is_best_first and not contextual
+                                and item.selected_indices
+                                and any(key not in trajectory.seen for key in item.next_keys)):
+                            # Progressive widening: the parent may propose its next
+                            # unseen neighbors later, ranked below its last score.
+                            parent = item.parent
+                            parent_score = (math.log(parent.node.objective) if parent.parent_key is None
+                                            else parent.score)
+                            # A re-queued root gets parent_key "" so its penalty accumulates.
+                            next_frontiers[id(trajectory)].append(_ScoredNode(
+                                parent.node, parent_score - widen_penalty,
+                                "" if parent.parent_key is None else parent.parent_key))
 
                         # Preserve completed starts even if a later start in this
                         # physical batch fails. Nothing remains after its budget.

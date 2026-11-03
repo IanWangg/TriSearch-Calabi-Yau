@@ -112,6 +112,58 @@ class RLValueBestFirst(RLValueBeamSearch):
                          value_discount=value_discount)
 
 
+class RLTunedBestFirst(RLValueBestFirst):
+    """RL BeFS with inference-time knobs for tuning; registered name is unchanged.
+
+    proposal_mode: "actor" (top-k by policy), "random" (k uniform unseen
+    neighbors, a control for the actor ranking) or "canonical" (first k).
+    score = ln V + value_discount * critic + logp_coef * log pi(edge).
+    widen_penalty: if not None, an expanded parent with unproposed unseen
+    neighbors returns to the frontier with score - widen_penalty, so its next
+    proposals can be queried later (progressive widening).
+    """
+
+    def __init__(self, policy_proposal_count: int = 4, value_discount: float = 0.9, *,
+                 proposal_mode: str = "actor", logp_coef: float = 0.0, widen_penalty: float | None = None):
+        if proposal_mode not in ("actor", "random", "canonical"):
+            raise ValueError("proposal_mode must be actor, random or canonical.")
+        if not math.isfinite(logp_coef) or (widen_penalty is not None and not math.isfinite(widen_penalty)):
+            raise ValueError("logp_coef and widen_penalty must be finite.")
+        super().__init__(policy_proposal_count=policy_proposal_count, value_discount=value_discount)
+        self.proposal_mode = proposal_mode
+        self.logp_coef = logp_coef
+        self.widen_penalty = widen_penalty
+        # Keep actor logits for logging and logp_coef even when all neighbors are proposed.
+        self.requires_policy = True
+
+    def propose(self, next_keys, log_probabilities, seen, rng, reserved=()):
+        if self.proposal_mode == "actor":
+            order = sorted(range(len(next_keys)), key=lambda i: (-log_probabilities[i], i))
+        elif self.proposal_mode == "random":
+            order = [int(i) for i in rng.permutation(len(next_keys))]
+        else:
+            order = range(len(next_keys))
+        selected, targets = [], set()
+        for index in order:
+            key = next_keys[index]
+            if key in seen or key in reserved or key in targets:
+                continue
+            selected.append(index)
+            targets.add(key)
+            if self.proposal_count != -1 and len(selected) >= self.proposal_count:
+                break
+        return sorted(selected)
+
+    def score_candidate(self, parent_score, log_probability, parent_objective, objective, reward, value):
+        base = super().score_candidate(parent_score, log_probability, parent_objective, objective, reward, value)
+        return base + self.logp_coef * float(log_probability)
+
+    def describe(self):
+        return dict(policy_proposal_count=self.proposal_count, value_discount=self.value_discount,
+                    proposal_mode=self.proposal_mode, logp_coef=self.logp_coef,
+                    widen_penalty=self.widen_penalty)
+
+
 class RLMetricValueBeamSearch(RLValueBeamSearch):
     """Compatibility name for RL value beam search."""
 
