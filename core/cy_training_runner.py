@@ -410,6 +410,14 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
             label="Eval",
         )
 
+        if h11_sampling_weights is not None:
+            pool_h11 = {train_h11_by_polytope[int(state.point_config_index)] for state in train_initial_state_pool}
+            unused = sorted(set(h11_sampling_weights) - pool_h11)
+            if unused:
+                raise ValueError(f"--h11_sampling_weights names h11 values with no training starts: {unused}.")
+            # Fails now, not at the first rollout, when a pool h11 has no weight.
+            train_engine.initial_state_probabilities(train_initial_state_pool)
+
         original_train_state_count = len(train_collection.base_states)
         count_visit_counts_by_key = (train_engine.history.counts("visitation")
                                     if train_engine.history is not None else {})
