@@ -6,7 +6,8 @@ from eval.algorithm.beam_search import BeamSearchAlgorithm
 from eval.algorithm.best_first import BestFirstAlgorithm
 from eval.algorithm.greedy import GreedyAlgorithm
 from eval.algorithm.random import RandomAlgorithm
-from eval.algorithm.cyopt_ga import CyoptGAAlgorithm
+from eval.algorithm.cyopt_ga import CyoptGAAlgorithm, CyoptGANoCrossAlgorithm
+from eval.algorithm.face_mutation import FaceMutationBeFS, FaceMutationHillClimb
 from eval.algorithm.rl import (
     RL_ALGORITHM_NAMES, RLAlgorithm, RLStochasticPolicy, RLPolicyBeamSearch, RLValueBeamSearch, RLValueBestFirst,
     RLMetricValueBeamSearch, RLMetricValueBestFirst,
@@ -19,6 +20,12 @@ def get_algorithm(name: str, *, beam_width: int = 4, policy_proposal_count: int 
                   ga_max_stalled_generations: int = 20) -> Algorithm:
     if name == "cyopt_ga":
         return CyoptGAAlgorithm(ga_population_size, ga_mutation_rate, ga_elitism, ga_max_stalled_generations)
+    if name == "cyopt_ga_nocross":
+        return CyoptGANoCrossAlgorithm(ga_population_size, ga_mutation_rate, ga_elitism, ga_max_stalled_generations)
+    if name == "face_mutation_hc":
+        return FaceMutationHillClimb()
+    if name == "face_mutation_befs":
+        return FaceMutationBeFS()
     if name == "rl_stochastic_policy":
         return RLStochasticPolicy()
     if name == "rl_policy_beam_search":
@@ -35,12 +42,13 @@ def get_algorithm(name: str, *, beam_width: int = 4, policy_proposal_count: int 
         return BeamSearchAlgorithm(beam_width)
     factories = {"random": RandomAlgorithm, "greedy": GreedyAlgorithm, "best_first": BestFirstAlgorithm}
     if name not in factories:
-        raise ValueError(f"Unknown evaluation algorithm {name!r}; available: {(*factories, 'beam_search', 'cyopt_ga', *RL_ALGORITHM_NAMES)}.")
+        raise ValueError(f"Unknown evaluation algorithm {name!r}; available: {(*factories, 'beam_search', 'cyopt_ga', 'cyopt_ga_nocross', 'face_mutation_hc', 'face_mutation_befs', *RL_ALGORITHM_NAMES)}.")
     return factories[name]()
 
 
 __all__ = ["Algorithm", "EvaluationAlgorithm", "EvaluationContext", "EvaluatedAction",
            "FrontierSearchAlgorithm", "SearchContext", "SearchNode", "BestFirstAlgorithm",
            "BeamSearchAlgorithm", "RandomAlgorithm", "GreedyAlgorithm", "get_algorithm",
+           "CyoptGAAlgorithm", "CyoptGANoCrossAlgorithm", "FaceMutationHillClimb", "FaceMutationBeFS",
            "RLAlgorithm", "RLStochasticPolicy", "RLPolicyBeamSearch", "RLValueBeamSearch", "RLValueBestFirst",
            "RLMetricValueBeamSearch", "RLMetricValueBestFirst", "RL_ALGORITHM_NAMES"]

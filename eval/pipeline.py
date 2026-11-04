@@ -190,14 +190,17 @@ def run_evaluation(
                     encoding = None
                     for state, algorithm, seed, start_index in zip(starts, algorithms, seeds, start_indices):
                         from eval.algorithm.cyopt_ga import CyoptEncoding, CyoptGAAlgorithm
+                        from eval.algorithm.face_mutation import FaceMutationBeFS, FaceMutationHillClimb
 
-                        if isinstance(algorithm, CyoptGAAlgorithm) and spec.objective_budget:
+                        if isinstance(algorithm, (CyoptGAAlgorithm, FaceMutationHillClimb, FaceMutationBeFS)) \
+                                and spec.objective_budget:
                             if encoding is None or encoding.configuration != state.configuration:
                                 encoding = CyoptEncoding(
                                     [item for item in starts if item.point_config_index == state.point_config_index],
                                     seed=derive_seed(spec.seed, "cyopt_encoding", state.point_config_index),
                                     max_points=spec.ga_face_max_points, samples=spec.ga_face_samples,
                                 )
+                                (output_dir / "cyopt_encoding").mkdir(exist_ok=True)
                                 writer.write_json(f"cyopt_encoding/polytope_{state.point_config_index}", encoding.metadata)
                                 print(f"cyopt_ga: polytope={state.point_config_index} "
                                       f"DNA dimensions={len(encoding.bounds)} "

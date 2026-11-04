@@ -128,6 +128,9 @@ class CyoptGAAlgorithm:
     encoding: CyoptEncoding | None = field(default=None, repr=False)
     name: str = field(default="cyopt_ga", init=False)
 
+    def _crossover(self):
+        return "npoint"
+
     def run_population(self, context) -> str:
         from cyopt import GA, TupleSpace
         from eval.rollout import ObjectiveBudgetExhausted
@@ -177,7 +180,7 @@ class CyoptGAAlgorithm:
         optimizer = GA(fitness_fn=fitness, space=SeededSpace(self.encoding.bounds),
                        population_size=self.population_size, mutation_rate=self.mutation_rate,
                        elitism=effective_elitism, seed=context.seed, cache_size=0,
-                       selection="tournament", crossover="npoint", mutation_k=1)
+                       selection="tournament", crossover=self._crossover(), mutation_k=1)
         generation, stalled = 0, 0
         try:
             while context.remaining_budget:
@@ -192,3 +195,18 @@ class CyoptGAAlgorithm:
         except ObjectiveBudgetExhausted:
             pass
         return "budget_exhausted"
+
+
+def _no_crossover(parents, rng):
+    """Return the two parents unchanged; selection, mutation and elitism still act."""
+    return parents[0].copy(), parents[1].copy()
+
+
+@dataclass
+class CyoptGANoCrossAlgorithm(CyoptGAAlgorithm):
+    """Upstream GA with recombination disabled (identity crossover)."""
+
+    name: str = field(default="cyopt_ga_nocross", init=False)
+
+    def _crossover(self):
+        return _no_crossover
