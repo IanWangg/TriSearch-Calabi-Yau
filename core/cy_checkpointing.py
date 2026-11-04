@@ -11,7 +11,7 @@ import torch
 
 def canonical_policy_model_config(config):
     """Fill only the encoder tag omitted by the two historical two_face formats."""
-    if isinstance(config, dict) and config.get("subcomplex_actor_type") == "two_face_deep_sets":
+    if isinstance(config, dict) and config.get("subcomplex_actor_type") in ("two_face_deep_sets", "two_face_invariant"):
         config = dict(config)
         config.setdefault("two_face_encoder", "triangle_dual" if "triangle_num_layers" in config else "deep_sets")
     return config

@@ -50,6 +50,10 @@ class PointMessagePassing(nn.Module):
 
 
 class InvariantTwoFaceAgent(TwoFaceAgent):
+    subcomplex_actor_type = "two_face_invariant"
+    # Rollout and evaluation build observations with add_invariant_fields for this builder kind.
+    observation_builder = "two_face_invariant"
+
     def __init__(self, *, mp_layers=4, **kwargs):
         super().__init__(**kwargs)
         if type(mp_layers) is not int or mp_layers <= 0:

@@ -74,6 +74,7 @@ from mdp.cy_rollout import (
     runtime_cache_hot_size,
     runtime_cache_total_unique_states,
 )
+from models.subcomplex_policy_config import TWO_FACE_ACTOR_TYPES
 from models.subcomplex_policy_config import (
     DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
     normalize_subcomplex_actor_type,
@@ -305,7 +306,7 @@ def _run_training(args: argparse.Namespace, transition_pool, cache_budget_bytes,
     )
     encoder_options = dict(two_face_encoder=args.two_face_encoder,
                            two_face_triangle_layers=args.two_face_triangle_layers)
-    if subcomplex_actor_type == "two_face_deep_sets":
+    if subcomplex_actor_type in TWO_FACE_ACTOR_TYPES:
         config_path = Path(checkpoint_dir) / "model_config.json"
         saved = json.loads(config_path.read_text()) if config_path.is_file() else None
         encoder_options = resolve_two_face_encoder_options(

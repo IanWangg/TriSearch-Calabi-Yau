@@ -8,7 +8,9 @@ CANONICAL_SUBCOMPLEX_ACTOR_TYPES = (
     "circuit_pool",
     "snn_simplex",
     "two_face_deep_sets",
+    "two_face_invariant",
 )
+TWO_FACE_ACTOR_TYPES = ("two_face_deep_sets", "two_face_invariant")
 SUBCOMPLEX_ACTOR_TYPE_ALIASES = {
     "default": DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
 }
@@ -24,7 +26,7 @@ def validate_two_face_encoder_options(actor_type, encoder, triangle_layers):
         raise ValueError(f"Unsupported two_face_encoder: {encoder!r}.")
     if triangle_layers is not None and (type(triangle_layers) is not int or triangle_layers <= 0):
         raise ValueError("two_face_triangle_layers must be a positive integer.")
-    if normalize_subcomplex_actor_type(actor_type) != "two_face_deep_sets":
+    if normalize_subcomplex_actor_type(actor_type) not in TWO_FACE_ACTOR_TYPES:
         if encoder is not None or triangle_layers is not None:
             raise ValueError("two_face encoder options require two_face_deep_sets.")
     if encoder == "deep_sets" and triangle_layers is not None:
@@ -63,11 +65,11 @@ def normalize_subcomplex_actor_type(subcomplex_actor_type: str) -> str:
 
 def value_feature_source_for_subcomplex_actor(subcomplex_actor_type: str) -> str:
     resolved_actor_type = normalize_subcomplex_actor_type(subcomplex_actor_type)
-    if resolved_actor_type == "two_face_deep_sets":
+    if resolved_actor_type in TWO_FACE_ACTOR_TYPES:
         return "two_face"
     return "snn_simplex" if resolved_actor_type == "snn_simplex" else "egnn"
 
 
 def observation_kind_for_subcomplex_actor(subcomplex_actor_type: str) -> str:
-    return ("two_face" if normalize_subcomplex_actor_type(subcomplex_actor_type) == "two_face_deep_sets"
+    return ("two_face" if normalize_subcomplex_actor_type(subcomplex_actor_type) in TWO_FACE_ACTOR_TYPES
             else "full_triangulation")

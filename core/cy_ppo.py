@@ -14,6 +14,7 @@ from core.cy_policy_inference import (
     evaluate_policy_actions_from_data_list,
     build_cy_data_list,
     policy_data_chunks,
+    policy_build_kind,
     policy_observation_kind,
     validate_policy_observations,
 )
@@ -320,7 +321,8 @@ def train_policy_from_rollout(
                 mini_data = build_cy_data_list(
                     [state_buffer_list[idx] for idx in mini_batch_indices],
                     [candidate_buffer_list[idx] for idx in mini_batch_indices],
-                    observation_kind=prepared_rollout.observation_kind,
+                    observation_kind=(policy_build_kind(policy) if prepared_rollout.observation_kind == "two_face"
+                                      else prepared_rollout.observation_kind),
                     include_simplex_topology=(getattr(policy, "value_feature_source", "") == "snn_simplex"
                                               or getattr(policy, "subcomplex_actor_type", "") == "snn_simplex"),
                 )

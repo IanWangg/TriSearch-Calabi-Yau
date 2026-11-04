@@ -140,3 +140,65 @@ calls on 6,360 states); the four runs ran in parallel with 4 CPU threads each.
    `git add -f`. Not changed here.
 8. A stray file `runs/inv_encoder_20261104_start.txt` was written in the main checkout by an earlier command; it is
    empty of results and can be removed.
+
+## A4: two_face_invariant in the PPO pipeline and eval/policy.py
+
+Changes (no default behavior change; the two_face_deep_sets path is the same code):
+- models/subcomplex_policy_config.py: "two_face_invariant" is a canonical actor type; TWO_FACE_ACTOR_TYPES groups it
+  with two_face_deep_sets for encoder-option validation and observation kind (two_face).
+- models/subcomplex_policy_factory.py: builds InvariantTwoFaceAgent for two_face_invariant (same arguments).
+- models/invariant_two_face_agent.py: subcomplex_actor_type = "two_face_invariant" (saved in model_config, so the
+  checkpoint round trip goes through the factory); observation_builder = "two_face_invariant".
+- core/two_face_invariant_features.py: create_invariant_two_face_data_from_state (default create_two_face_data_from_state
+  plus invariant fields, invariant fields cached per (configuration, restrictions), LRU 50,000 entries).
+- core/cy_policy_inference.py: build_cy_data_list accepts observation_kind "two_face_invariant"; policy_build_kind(policy)
+  is used at the build call sites (action selection, scoring, values, action evaluation); the step-result observation_kind
+  stays the data kind "two_face". core/cy_ppo.py mini-batch rebuild uses policy_build_kind.
+- core/cy_checkpointing.py, eval/policy.py, core/cy_training_runner.py, core/cy_training_config.py: accept the new type
+  wherever two_face_deep_sets is accepted (checkpoint model_config encoder tag, EvaluationPolicy.from_spec, the training
+  config path, best_so_far validation).
+
+Tests: test/test_invariant_rl_path.py (3 passed): factory and config registration; checkpoint save/load and
+EvaluationPolicy.from_spec round trip, with a mismatched architecture refused; the rollout observation path on a real
+4D state (real_representatives) equals add_invariant_fields(create_two_face_data_from_state(...)) for all keys, and the
+value and logits forward are equal to 1e-6; the second observation of the same topology is a cache hit.
+Existing suites run with the change: test_cy_two_face_policy.py, test_two_face_agent.py, test_invariant_two_face.py,
+test_cy_bounded_ppo.py, test_cy_two_face_data.py: 83 passed (plus the 3 new tests above).
+
+Observation overhead (eval/sweep/inv_encoder_20261104/measure_obs_overhead.py, 12 real states, 1 thread, medians):
+default create_two_face_data_from_state 5.2 ms; invariant, cache miss 9.3 ms (+4.1 ms); invariant, cache hit 6.2 ms
+(+1.0 ms). Output: runs/inv_encoder_20261104/obs_overhead.json.
+
+Smoke (run_inv_rl_smoke.sh): see the status section below.
+
+### Smoke status (2026-11-04)
+
+The first smoke launch (3 iterations, 16 states, 2 transition workers, GPU 4, eval_interval 1) did not complete an
+iteration in 34 minutes, while the machine load average was about 60. The process was alive, mostly blocked on futex
+waits, with no worker child processes visible. Stopping it and relaunching unbuffered was denied by the permission
+layer, so the timing comparison with the baseline (iteration median 96.6 s at 128 states, 24 workers) is not available.
+The command is in run_inv_rl_smoke.sh. That script has no -u flag; the stdout log is block-buffered, which is why the run looked silent.
+
+### A4 full RL run (not launched)
+
+Same as baseline G (fv1_mix_g099_s0_20261103_0604) except the actor type and transition workers (14, per the coordinator
+brief). Paths follow the baseline layout; the run is not launched.
+
+```bash
+export MOSEKLM_LICENSE_FILE=$HOME/mosek/mosek.lic
+W=/home/yiranwang/combinartorics/TriSearch-Calabi-Yau/.claude/worktrees/bridge-cse_01W7whPSySKiYGCEwuxiRkNf
+R=/home/yiranwang/combinartorics/TriSearch-Calabi-Yau
+RUN=$R/runs/inv_rl_full_20261104
+cd $W
+PYTHONPATH=$W /home/yiranwang/anaconda3/envs/sage/bin/python scripts/train_cy.py \
+  --dataset_path $R/data/cy/favorable_v1/train/h11_15.samples.jsonl $R/data/cy/favorable_v1/train/h11_20.samples.jsonl \
+  --eval_dataset_path $R/data/cy/favorable_v1/dev/h11_15.samples.jsonl $R/data/cy/favorable_v1/dev/h11_20.samples.jsonl \
+  --in_channels 4 --subcomplex_actor_type two_face_invariant --neighbor_mode two_neighbors --no-include_points_interior_to_facets \
+  --reward_function max_kcup --hidden_channels 64 --out_channels 64 --num_layers 3 --count_bonus_coef 0 --no-vertex_aug_enable \
+  --seed 0 --num_iterations 200 --num_epochs 1 --num_states 128 --rollout_length 20 --batch_size 128 --lr 0.0001 \
+  --use_multiprocessing --transition_num_workers 14 --memory_budget_gb 72 --runtime_cache_gb 16 \
+  --num_eval_states 128 --eval_steps 30 --eval_interval 50 --deterministic_eval \
+  --checkpoint_path $RUN/checkpoints --iteration_metrics_path $RUN/iteration_metrics.jsonl \
+  --latest_checkpoint_interval 10 --save_interval 50 --wandb_project calabi_yau_two_face_kcup \
+  --name_suffix inv_rl_full_20261104 --gpu_index 4 --seed 0 --use_wandb --gamma 0.99 --gae_lambda 0.95
+```

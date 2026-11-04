@@ -19,6 +19,8 @@ All features are computed from invariants only, so they are unchanged by GL(4,Z)
 by any relabelling of nodes, triangles or faces.
 """
 
+from collections import OrderedDict
+
 import numpy as np
 import torch
 from scipy.spatial import ConvexHull
@@ -152,4 +154,49 @@ def add_invariant_fields(data):
         out[key] = value
     for key, value in invariant_fields(data).items():
         out[key] = value
+    return out
+
+
+# ----------------------------------------------------------------- policy observation path
+
+INVARIANT_TOPOLOGY_CACHE_SIZE = 50_000
+_invariant_topology_cache = OrderedDict()
+_invariant_topology_stats = {"hits": 0, "misses": 0}
+
+
+def invariant_topology_cache_stats():
+    return dict(_invariant_topology_stats, entries=len(_invariant_topology_cache))
+
+
+def clear_invariant_topology_cache():
+    _invariant_topology_cache.clear()
+    _invariant_topology_stats.update(hits=0, misses=0)
+
+
+def create_invariant_two_face_data_from_state(state, actions=()):
+    """Rollout/eval observation for two_face_invariant: create_two_face_data_from_state plus invariant fields.
+
+    The invariant fields depend only on the topology, so they are cached per (configuration, restrictions).
+    Actions do not change them. Returns an InvariantTwoFaceData; the base TwoFaceData is not mutated.
+    """
+    from core.cy_two_face_data import create_two_face_data_from_state
+    from mdp.cy_state_record import two_face_restrictions
+
+    base = create_two_face_data_from_state(state, actions)
+    key = (state.configuration, two_face_restrictions(state.configuration, state.simplices))
+    fields = _invariant_topology_cache.get(key)
+    if fields is None:
+        _invariant_topology_stats["misses"] += 1
+        fields = invariant_fields(base)
+        _invariant_topology_cache[key] = fields
+        if len(_invariant_topology_cache) > INVARIANT_TOPOLOGY_CACHE_SIZE:
+            _invariant_topology_cache.popitem(last=False)
+    else:
+        _invariant_topology_stats["hits"] += 1
+        _invariant_topology_cache.move_to_end(key)
+    out = InvariantTwoFaceData()
+    for name, value in base.items():
+        out[name] = value
+    for name, value in fields.items():
+        out[name] = value
     return out

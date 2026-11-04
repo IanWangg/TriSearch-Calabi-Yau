@@ -12,6 +12,7 @@ from .subcomplex_policy_config import (
     DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
     SUBCOMPLEX_ACTOR_TYPE_ALIASES,
     SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
+    TWO_FACE_ACTOR_TYPES,
     normalize_subcomplex_actor_type,
     value_feature_source_for_subcomplex_actor,
     validate_two_face_encoder_options,
@@ -77,12 +78,15 @@ def build_subcomplex_agent(
     resolved_actor_type = normalize_subcomplex_actor_type(subcomplex_actor_type)
     validate_two_face_encoder_options(resolved_actor_type, two_face_encoder, two_face_triangle_layers)
 
-    if resolved_actor_type == "two_face_deep_sets":
+    if resolved_actor_type in TWO_FACE_ACTOR_TYPES:
         if resolved_model_type != "egnn" or not share_encoder:
-            raise ValueError("two_face_deep_sets requires model_type='egnn' and share_encoder=True.")
-        from .two_face_agent import TwoFaceAgent
+            raise ValueError("two_face actors require model_type='egnn' and share_encoder=True.")
+        if resolved_actor_type == "two_face_invariant":
+            from .invariant_two_face_agent import InvariantTwoFaceAgent as two_face_cls
+        else:
+            from .two_face_agent import TwoFaceAgent as two_face_cls
 
-        return TwoFaceAgent(
+        return two_face_cls(
             in_channels=in_channels, out_channels=out_channels, hidden_channels=hidden_channels,
             num_layers=num_layers, act=act, device=device,
             training_reward_mode=training_reward_mode, episode_horizon=episode_horizon,
@@ -93,7 +97,7 @@ def build_subcomplex_agent(
         if resolved_model_type != "egnn" or resolved_actor_type != "snn_simplex":
             raise ValueError("best_so_far requires the EGNN snn_simplex policy.")
     elif training_reward_mode not in (STEP_LOG_VOLUME, INCREMENTAL):
-        raise ValueError("Episode context requires two_face_deep_sets.")
+        raise ValueError("Episode context requires a two_face actor.")
     agent_cls = get_subcomplex_agent_class(resolved_model_type)
     kwargs = dict(
         in_channels=in_channels,

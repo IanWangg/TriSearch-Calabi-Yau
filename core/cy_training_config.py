@@ -11,6 +11,7 @@ from core.cy_episode_context import (
     STEP_LOG_VOLUME, TRAINING_REWARD_MODES,
 )
 from mdp.cy_state_record import NEIGHBOR_MODES
+from models.subcomplex_policy_config import TWO_FACE_ACTOR_TYPES
 from models.subcomplex_policy_config import (
     DEFAULT_SUBCOMPLEX_ACTOR_TYPE,
     SUPPORTED_SUBCOMPLEX_ACTOR_TYPES,
@@ -540,8 +541,8 @@ def validate_two_face_training_args(args: argparse.Namespace) -> None:
         if args.vertex_aug_enable:
             raise ValueError("best_so_far requires augmentation disabled.")
     if getattr(args, "training_reward_mode", STEP_LOG_VOLUME) == BEST_SO_FAR_LOG_VOLUME:
-        if args.subcomplex_actor_type != "two_face_deep_sets":
-            raise ValueError("best_so_far_log_volume requires two_face_deep_sets.")
+        if args.subcomplex_actor_type not in TWO_FACE_ACTOR_TYPES:
+            raise ValueError("best_so_far_log_volume requires a two_face actor.")
         if args.gamma != 1.0:
             raise ValueError("best_so_far_log_volume requires gamma=1.")
         if args.rollout_length <= 0 or args.eval_steps <= 0:

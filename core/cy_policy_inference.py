@@ -12,6 +12,7 @@ from torch_geometric.data import Batch, Data
 
 from core.cy_data_utils import create_data_from_cy_state_with_subcomplex, get_cached_transformed_vertices
 from core.cy_two_face_data import create_two_face_data_from_state, TwoFaceContextData
+from core.two_face_invariant_features import create_invariant_two_face_data_from_state
 from core.cy_episode_context import EpisodeContext
 from core.vertex_augmentation import SimilarityTransform
 from core.vertex_preprocessing import VertexPreprocessor
@@ -112,6 +113,13 @@ def policy_observation_kind(policy: Any) -> str:
     return str(getattr(policy, "observation_kind", "full_triangulation"))
 
 
+def policy_build_kind(policy: Any) -> str:
+    """Observation builder kind: the data kind, except two_face_invariant builds invariant TwoFaceData."""
+    if getattr(policy, "observation_builder", None) == "two_face_invariant":
+        return "two_face_invariant"
+    return policy_observation_kind(policy)
+
+
 def validate_policy_observations(data_list, policy):
     expected = policy_observation_kind(policy)
     for data in data_list:
@@ -165,13 +173,21 @@ def build_cy_data_list(
     if len(states) == 0:
         return []
 
-    if observation_kind == "two_face":
+    if observation_kind in ("two_face", "two_face_invariant"):
         if subcomplex_width not in (None, 4):
             raise ValueError("two_face observation requires action width 4.")
         if trajectory_transforms is not None or (vertex_preprocessor is not None and vertex_preprocessor.mode != "none"):
             raise ValueError("two_face v1 requires raw coordinates without preprocessing or augmentation.")
         if include_simplex_topology:
             raise ValueError("two_face observation cannot include full simplex topology.")
+        if observation_kind == "two_face_invariant":
+            data_list = [create_invariant_two_face_data_from_state(state, actions)
+                         for state, actions in zip(states, action_lists)]
+            if episode_contexts is not None:
+                for data, context in zip(data_list, episode_contexts):
+                    data.episode_context = torch.tensor([context.features()], dtype=torch.float32)
+                    data.observation_schema_version = 2
+            return data_list
         data_list = [create_two_face_data_from_state(state, actions) for state, actions in zip(states, action_lists)]
         if episode_contexts is not None:
             data_list = [TwoFaceContextData(**data.to_dict(), episode_context=torch.tensor(
@@ -348,7 +364,7 @@ def evaluate_policy_scores(
     data = build_cy_data_list(
         states, [()] * len(states) if value_only and policy_observation_kind(policy) == "two_face" else action_lists,
         include_simplex_topology=_policy_uses_simplex_topology(policy),
-        observation_kind=policy_observation_kind(policy),
+        observation_kind=policy_build_kind(policy),
         episode_contexts=episode_contexts,
     )
     build_sec = time.perf_counter() - start
@@ -390,7 +406,7 @@ def batched_policy_action_selection(
         vertex_preprocessor=vertex_preprocessor,
         trajectory_transforms=trajectory_transforms,
         include_simplex_topology=include_simplex_topology,
-        observation_kind=policy_observation_kind(policy),
+        observation_kind=policy_build_kind(policy),
         episode_contexts=episode_contexts,
     )
     data_build_sec = time.perf_counter() - data_build_start
@@ -708,7 +724,7 @@ def evaluate_policy_values(
         vertex_preprocessor=vertex_preprocessor,
         trajectory_transforms=trajectory_transforms,
         include_simplex_topology=include_simplex_topology,
-        observation_kind=policy_observation_kind(policy),
+        observation_kind=policy_build_kind(policy),
         episode_contexts=episode_contexts,
     )
     data_build_sec = time.perf_counter() - data_build_start
@@ -861,7 +877,7 @@ def evaluate_policy_actions(
         vertex_preprocessor=vertex_preprocessor,
         trajectory_transforms=trajectory_transforms,
         include_simplex_topology=include_simplex_topology,
-        observation_kind=policy_observation_kind(policy),
+        observation_kind=policy_build_kind(policy),
         episode_contexts=episode_contexts,
     )
     data_build_sec = time.perf_counter() - data_build_start
