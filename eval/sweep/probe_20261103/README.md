@@ -269,3 +269,21 @@ Sanity (c): train-state EV 0.179 vs training-log EV 0.238; |diff| = 0.059 (pass)
 | probe ctx_s1 | dev | all | 960 | 0.167 [0.138, 0.197] | 0.484 [0.445, 0.522] | 0.306 | 0.280 [0.253, 0.310] | 0.302 [0.218, 0.383] | 0.073 [0.022, 0.121] |
 | probe ctx_s1 | dev | 15 | 480 | 0.190 [0.148, 0.229] | 0.521 [0.454, 0.579] | 0.379 | 0.259 [0.217, 0.303] | 0.288 [0.181, 0.387] | 0.071 [0.023, 0.120] |
 | probe ctx_s1 | dev | 20 | 480 | 0.144 [0.108, 0.179] | 0.448 [0.402, 0.500] | 0.232 | 0.301 [0.267, 0.336] | 0.237 [0.142, 0.346] | 0.046 [-0.017, 0.107] |
+
+## Memorization check (plain variant, seed 0)
+
+Question: can the same architecture fit a small train set, and where does the training loss sit relative to its floor?
+Setup: `probe_train.py --variant plain --seed 0 --n_polytopes 50 --epochs 300 --no_early_stop` (50 seeded S_sup train
+polytopes, 600 states; no validation, no early stop; the final weights are reported). The entropy floor is the mean entropy
+of the targets softmax(dlnV / 0.1), which lower-bounds the listwise cross entropy for these states. Single seed, so no CI.
+Metrics are on the same 600 train states. Recall and Spearman(actor) use states with >= 2 children. Logs and predictions are
+in `runs/probe_20261103/memo/` (not committed).
+
+| config | lr | hidden/out | final train CE | entropy floor | final train loss (CE + 0.5 MSE) | Spearman(actor, dlnV) | recall@1 | recall@4 | Spearman(V, y1) | EV(V, y1) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| base | 3e-4 | 64 | 1.076 | 0.563 | 1.123 | 0.391 | 0.813 | 0.988 | 0.767 | 0.638 |
+| lr | 1e-3 | 64 | 0.693 | 0.563 | 0.720 | 0.505 | 0.923 | 1.000 | 0.875 | 0.816 |
+| 2x width | 3e-4 | 128 | 0.669 | 0.563 | 0.681 | 0.487 | 0.923 | 1.000 | 0.936 | 0.900 |
+
+Train CE by epoch (base): 1.80 (epoch 99), 1.38 (199), 1.22 (249), 1.08 (299), so the base run had not plateaued at 300 epochs.
+The lr 1e-3 run is at 0.70 (249) and 0.69 (299), and the 2x-width run at 0.72 (249) and 0.67 (299). Both are within 0.13 of the floor.

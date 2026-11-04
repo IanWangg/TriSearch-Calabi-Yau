@@ -172,6 +172,12 @@ def main(argv=None):
     parser.add_argument("--value_coef", type=float, default=0.5)
     parser.add_argument("--force_cpu", action="store_true")
     parser.add_argument("--max_states", type=int, default=0, help="Smoke tests only: truncate the train set.")
+    parser.add_argument("--n_polytopes", type=int, default=0,
+                        help="Memorization check: keep only this many seeded S_sup train polytopes (0 = all).")
+    parser.add_argument("--width", type=int, default=64, help="hidden and out channels of the EGNN and heads.")
+    parser.add_argument("--no_early_stop", action="store_true",
+                        help="Memorization check: train all epochs and keep the final weights.")
+    parser.add_argument("--tag", default="", help="Suffix for output names.")
     args = parser.parse_args(argv)
 
     torch.manual_seed(args.seed)
@@ -189,13 +195,27 @@ def main(argv=None):
     val_items = [it for it in sup_items if it["record"]["role"] == "val"]
     if args.max_states:
         train_items, val_items = train_items[:args.max_states], val_items[:max(1, args.max_states // 4)]
+    if args.n_polytopes:
+        pids = sorted({it["record"]["polytope_index"] for it in train_items})
+        chosen = set(np.random.default_rng([args.seed, 62]).choice(pids, args.n_polytopes, replace=False).tolist())
+        train_items = [it for it in train_items if it["record"]["polytope_index"] in chosen]
+        val_items = []
     print(f"S_sup train states={len(train_items)} val states={len(val_items)} dev states={len(dev_items)}",
           flush=True)
     lnv_train = np.array([it["record"]["lnV"] for it in train_items])
     ctx_mean, ctx_std = float(lnv_train.mean()), float(lnv_train.std() + 1e-8)
 
-    config = dict(in_channels=4, out_channels=64, hidden_channels=64, num_layers=3, act="silu",
+    config = dict(in_channels=4, out_channels=args.width, hidden_channels=args.width, num_layers=3, act="silu",
                   two_face_encoder="deep_sets")
+    # Entropy of the actor targets: the floor of the listwise cross entropy for these states.
+    entropies = []
+    for item in train_items:
+        target = np.exp((item["dlnv"] / args.tau) - (item["dlnv"] / args.tau).max())
+        target = target / target.sum()
+        entropies.append(float(-(target * np.log(target)).sum()))
+    entropy_floor = float(np.mean(entropies)) if entropies else float("nan")
+    print(f"n_train_states={len(train_items)} n_polytopes={len({it['record']['polytope_index'] for it in train_items})} "
+          f"entropy_floor_ce={entropy_floor:.4f}", flush=True)
     model_class = ContextTwoFaceAgent if args.variant == "ctx" else TwoFaceAgent
     model = model_class(device=device, **config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -206,15 +226,16 @@ def main(argv=None):
     for epoch in range(args.epochs):
         model.train()
         order = rng.permutation(len(train_items))
-        epoch_loss, batches = 0.0, 0
+        epoch_loss, epoch_ce, batches = 0.0, 0.0, 0
         for start in range(0, len(order), args.batch_size):
             chunk = [train_items[k] for k in order[start:start + args.batch_size]]
             batch, dlnv, mask, y1 = make_batch(chunk, device, ctx_mean, ctx_std, args.variant)
-            loss, _, _ = losses(model, batch, dlnv, mask, y1, args.tau, args.value_coef)
+            loss, ce, _ = losses(model, batch, dlnv, mask, y1, args.tau, args.value_coef)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
+            epoch_ce += ce
             batches += 1
         model.eval()
         val_total, val_ce, val_mse, val_n = 0.0, 0.0, 0.0, 0
@@ -228,11 +249,14 @@ def main(argv=None):
                 val_mse += mse * len(chunk)
                 val_n += len(chunk)
         val_loss = val_total / max(val_n, 1) if val_n else epoch_loss / max(batches, 1)
-        row = dict(epoch=epoch, train_loss=epoch_loss / max(batches, 1), val_loss=val_loss,
+        row = dict(epoch=epoch, train_loss=epoch_loss / max(batches, 1), train_ce=epoch_ce / max(batches, 1),
+                   val_loss=val_loss,
                    val_ce=val_ce / max(val_n, 1), val_mse=val_mse / max(val_n, 1),
                    elapsed_sec=time.time() - started)
         history.append(row)
         print(json.dumps(row), flush=True)
+        if args.no_early_stop:
+            continue
         if val_loss < best_val - 1e-6:
             best_val, best_epoch, stale = val_loss, epoch, 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -241,14 +265,19 @@ def main(argv=None):
             if stale >= args.patience:
                 print(f"early stop at epoch {epoch}; best epoch {best_epoch}", flush=True)
                 break
-    model.load_state_dict(best_state)
-    tag = f"{args.variant}_s{args.seed}"
+    if args.no_early_stop:
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        best_epoch = len(history) - 1
+    else:
+        model.load_state_dict(best_state)
+    tag = f"{args.variant}_s{args.seed}{args.tag}"
     torch.save(best_state, out_dir / f"{tag}.pth")
     (out_dir / f"{tag}_train_log.json").write_text(json.dumps(dict(
         variant=args.variant, seed=args.seed, config=config, history=history, best_epoch=best_epoch,
         best_val_loss=best_val, ctx_mean=ctx_mean, ctx_std=ctx_std, tau=args.tau, lr=args.lr,
         value_coef=args.value_coef, batch_size=args.batch_size, device=str(device),
-        n_train=len(train_items), n_val=len(val_items), n_dev=len(dev_items),
+        n_train=len(train_items), n_val=len(val_items), n_dev=len(dev_items), entropy_floor_ce=entropy_floor,
+        n_polytopes=args.n_polytopes, no_early_stop=args.no_early_stop,
         wall_sec=time.time() - started), indent=2))
 
     predictions = []
