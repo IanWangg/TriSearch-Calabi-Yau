@@ -26,7 +26,7 @@ python analyze.py --budget 1000 --bootstrap 2000 --out $R/runs/face_mutation_202
 ```
 
 Data: 10 h11 = 50 favorable polytopes (HF revision in common.py) x 3 FRST starts, seed 0, budget 1000 Kcup queries per run.
-Wall time about 13 h on 14 CPU workers. One shard failed: `face_mutation_hc` polytope 9 (Kcup tip solver failed on one
+Wall time about 9 h on 14 CPU workers. One shard failed: `face_mutation_hc` polytope 9 (Kcup tip solver failed on one
 state with all backends, after 182 queries). Paired comparisons below drop polytope 9 for all algorithms (27 units).
 
 ## Results (best lnV at budget 1000; unit = polytope x start)
