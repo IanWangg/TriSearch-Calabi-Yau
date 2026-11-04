@@ -287,3 +287,32 @@ in `runs/probe_20261103/memo/` (not committed).
 
 Train CE by epoch (base): 1.80 (epoch 99), 1.38 (199), 1.22 (249), 1.08 (299), so the base run had not plateaued at 300 epochs.
 The lr 1e-3 run is at 0.70 (249) and 0.69 (299), and the 2x-width run at 0.72 (249) and 0.67 (299). Both are within 0.13 of the floor.
+
+## Pooling ablation (plain variant, full S_sup, early stopping as in the main plain runs)
+
+Same pooling choice at both sites: triangles -> face and faces -> graph. `sum` is the TwoFaceAgent default (the existing
+plain_s0 / plain_s1 runs). `mean`, `max` and `summax` (concatenate sum and max, then Linear back to 64) are in
+`PoolingTwoFaceAgent` in `probe_train.py`. models/ is not changed. Check: with `sum`, the subclass reproduces
+TwoFaceAgent exactly (max abs diff 0.0 on value and logits). Parameter counts: sum and mean and max 154,562; summax 171,074.
+Commands: `probe_train.py --variant plain --seed {0,1} --pooling {mean,max,summax} --tag _pool<mode>`, then
+`pooling_ablation.py`. Logs and predictions are in `runs/probe_20261103/probe/` (not committed). Metrics: 95% percentile CI
+over polytopes (B = 1000). Best epoch and best val loss come from the early-stop selection on S_sup_val.
+
+| pooling (face / graph) | seed | split | n_states | n_polytopes | recall@1 | recall@4 | Spearman(actor, dlnV) | Spearman(V, y1) | best epoch | best val loss |
+|---|---|---|---|---|---|---|---|---|---|---|
+| sum | 0 | dev | 960 | 60 | 0.141 [0.118, 0.163] | 0.499 [0.459, 0.539] | 0.269 [0.237, 0.295] | 0.191 [0.079, 0.297] | 8 | 2.4251 |
+| sum | 0 | S_sup_val | 540 | 45 | 0.202 [0.167, 0.237] | 0.589 [0.530, 0.650] | 0.294 [0.257, 0.331] | 0.230 [0.122, 0.342] | 8 | 2.4251 |
+| sum | 1 | dev | 960 | 60 | 0.153 [0.126, 0.179] | 0.482 [0.445, 0.522] | 0.285 [0.254, 0.311] | 0.148 [0.031, 0.264] | 6 | 2.4213 |
+| sum | 1 | S_sup_val | 540 | 45 | 0.204 [0.163, 0.243] | 0.594 [0.537, 0.652] | 0.315 [0.281, 0.352] | 0.165 [0.036, 0.283] | 6 | 2.4213 |
+| mean | 0 | dev | 960 | 60 | 0.155 [0.130, 0.182] | 0.477 [0.439, 0.515] | 0.282 [0.250, 0.308] | 0.051 [-0.070, 0.174] | 15 | 2.4131 |
+| mean | 0 | S_sup_val | 540 | 45 | 0.206 [0.170, 0.241] | 0.593 [0.537, 0.648] | 0.305 [0.270, 0.340] | 0.061 [-0.074, 0.196] | 15 | 2.4131 |
+| mean | 1 | dev | 960 | 60 | 0.166 [0.139, 0.193] | 0.484 [0.443, 0.526] | 0.281 [0.252, 0.306] | 0.107 [-0.006, 0.228] | 11 | 2.4121 |
+| mean | 1 | S_sup_val | 540 | 45 | 0.217 [0.180, 0.254] | 0.596 [0.539, 0.654] | 0.305 [0.267, 0.341] | 0.087 [-0.047, 0.218] | 11 | 2.4121 |
+| max | 0 | dev | 960 | 60 | 0.151 [0.126, 0.177] | 0.485 [0.447, 0.523] | 0.273 [0.243, 0.300] | 0.219 [0.134, 0.298] | 13 | 2.4174 |
+| max | 0 | S_sup_val | 540 | 45 | 0.196 [0.159, 0.233] | 0.596 [0.539, 0.650] | 0.306 [0.270, 0.341] | 0.238 [0.124, 0.347] | 13 | 2.4174 |
+| max | 1 | dev | 960 | 60 | 0.150 [0.124, 0.179] | 0.478 [0.430, 0.524] | 0.281 [0.251, 0.305] | 0.205 [0.098, 0.299] | 18 | 2.4159 |
+| max | 1 | S_sup_val | 540 | 45 | 0.202 [0.165, 0.239] | 0.594 [0.535, 0.650] | 0.319 [0.287, 0.352] | 0.207 [0.088, 0.310] | 18 | 2.4159 |
+| summax | 0 | dev | 960 | 60 | 0.150 [0.126, 0.175] | 0.486 [0.447, 0.526] | 0.278 [0.248, 0.304] | 0.225 [0.133, 0.312] | 13 | 2.4210 |
+| summax | 0 | S_sup_val | 540 | 45 | 0.211 [0.176, 0.246] | 0.607 [0.550, 0.663] | 0.310 [0.273, 0.347] | 0.243 [0.126, 0.350] | 13 | 2.4210 |
+| summax | 1 | dev | 960 | 60 | 0.150 [0.126, 0.174] | 0.485 [0.445, 0.527] | 0.271 [0.240, 0.298] | 0.207 [0.103, 0.296] | 9 | 2.4102 |
+| summax | 1 | S_sup_val | 540 | 45 | 0.215 [0.178, 0.250] | 0.596 [0.535, 0.657] | 0.298 [0.260, 0.334] | 0.222 [0.109, 0.326] | 9 | 2.4102 |

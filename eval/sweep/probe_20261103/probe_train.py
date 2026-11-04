@@ -51,6 +51,71 @@ class ContextTwoFaceAgent(TwoFaceAgent):
         return h, z, faces, self.ctx_proj(torch.cat((global_features, context), dim=-1)), face_graph
 
 
+POOLING_MODES = ("sum", "mean", "max", "summax")
+
+
+def _sum(features, indices, size):
+    return features.new_zeros((size, features.size(-1))).index_add(0, indices, features)
+
+
+def _reduce(values, index, size, mode):
+    """Segment reduction over `index` (sum, mean or max) for a [N, C] tensor."""
+    width = values.size(-1)
+    if mode == "sum":
+        return values.new_zeros((size, width)).index_add(0, index, values)
+    if mode == "mean":
+        total = values.new_zeros((size, width)).index_add(0, index, values)
+        count = torch.bincount(index, minlength=size).to(values.dtype).unsqueeze(-1)
+        return total / count.clamp_min(1)
+    if mode == "max":
+        out = values.new_zeros((size, width))
+        return out.scatter_reduce(0, index.unsqueeze(-1).expand_as(values), values, reduce="amax", include_self=False)
+    raise ValueError(mode)
+
+
+class PoolingTwoFaceAgent(TwoFaceAgent):
+    """TwoFaceAgent with the same pooling choice for triangles -> face and faces -> graph.
+
+    sum reproduces TwoFaceAgent._encode exactly. summax concatenates sum and max and
+    projects back to the channel width with a Linear layer (one per pooling site).
+    """
+
+    def __init__(self, *, pooling="sum", **kwargs):
+        if pooling not in POOLING_MODES:
+            raise ValueError(pooling)
+        super().__init__(**kwargs)
+        self.pooling = pooling
+        width = self.model_config["out_channels"]
+        device = kwargs["device"]
+        if pooling == "summax":
+            self.face_proj = nn.Linear(2 * width, width).to(device)
+            self.global_proj = nn.Linear(2 * width, width).to(device)
+
+    def _pool_sites(self, values, index, size, projection):
+        if self.pooling != "summax":
+            return _reduce(values, index, size, self.pooling)
+        both = torch.cat((_reduce(values, index, size, "sum"), _reduce(values, index, size, "max")), dim=-1)
+        return projection(both)
+
+    def _encode(self, batch):
+        h, _ = self.point_egnn(h=batch.x, x=batch.x, edges=batch.edge_index)
+        z = self.triangle_mlp(h[batch.triangle_vertices].sum(dim=1))
+        for layer in self.triangle_dual:
+            z = layer(z, batch.triangle_edge_index)
+        face_counts = batch.num_faces.reshape(-1).long()
+        face_graph = torch.repeat_interleave(torch.arange(batch.num_graphs, device=h.device), face_counts)
+        num_faces = face_graph.numel()
+        node_counts = torch.bincount(batch.node_face, minlength=num_faces).to(h.dtype).unsqueeze(-1)
+        centroids = _sum(batch.x, batch.node_face, num_faces) / node_counts.clamp_min(1)
+        face_pool = self._pool_sites(self.phi_triangle(z), batch.triangle_face, num_faces,
+                                     getattr(self, "face_proj", None))
+        faces = self.face_mlp(torch.cat((face_pool, centroids, node_counts), dim=-1))
+        graph_pool = self._pool_sites(self.phi_face(faces), face_graph, batch.num_graphs,
+                                      getattr(self, "global_proj", None))
+        global_features = self.rho(torch.cat((graph_pool, face_counts.to(h.dtype).unsqueeze(-1)), dim=-1))
+        return h, z, faces, global_features, face_graph
+
+
 def load_records(run_dir, set_names):
     shard_cache, items = {}, []
     for set_name in set_names:
@@ -178,6 +243,8 @@ def main(argv=None):
     parser.add_argument("--no_early_stop", action="store_true",
                         help="Memorization check: train all epochs and keep the final weights.")
     parser.add_argument("--tag", default="", help="Suffix for output names.")
+    parser.add_argument("--pooling", choices=POOLING_MODES, default="sum",
+                        help="Pooling for triangles -> face and faces -> graph (plain variant).")
     args = parser.parse_args(argv)
 
     torch.manual_seed(args.seed)
@@ -216,8 +283,12 @@ def main(argv=None):
     entropy_floor = float(np.mean(entropies)) if entropies else float("nan")
     print(f"n_train_states={len(train_items)} n_polytopes={len({it['record']['polytope_index'] for it in train_items})} "
           f"entropy_floor_ce={entropy_floor:.4f}", flush=True)
-    model_class = ContextTwoFaceAgent if args.variant == "ctx" else TwoFaceAgent
-    model = model_class(device=device, **config).to(device)
+    if args.variant == "ctx":
+        model = ContextTwoFaceAgent(device=device, **config).to(device)
+    elif args.pooling != "sum":
+        model = PoolingTwoFaceAgent(pooling=args.pooling, device=device, **config).to(device)
+    else:
+        model = TwoFaceAgent(device=device, **config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     best_val, best_state, best_epoch, stale = float("inf"), None, -1, 0
@@ -277,7 +348,7 @@ def main(argv=None):
         best_val_loss=best_val, ctx_mean=ctx_mean, ctx_std=ctx_std, tau=args.tau, lr=args.lr,
         value_coef=args.value_coef, batch_size=args.batch_size, device=str(device),
         n_train=len(train_items), n_val=len(val_items), n_dev=len(dev_items), entropy_floor_ce=entropy_floor,
-        n_polytopes=args.n_polytopes, no_early_stop=args.no_early_stop,
+        n_polytopes=args.n_polytopes, no_early_stop=args.no_early_stop, pooling=args.pooling,
         wall_sec=time.time() - started), indent=2))
 
     predictions = []
