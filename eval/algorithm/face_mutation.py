@@ -40,6 +40,7 @@ class _MutationRun:
         if len(self.faces) != len(self.bounds):
             raise ValueError("Codebook interesting faces do not match the DNA bounds.")
         self.known: set[tuple[int, ...]] = set()
+        self.states = {}  # DNA -> CyStateRecord for every evaluated (feasible) DNA and the start
         self.generation = 0
 
     def start_dna(self):
@@ -100,18 +101,23 @@ class _MutationRun:
             face_symdiff=symdiff, flip_distance=symdiff / 2, feasible=feasible,
             objective=value, parent_objective=parent_value, dlnV=dlnv, **extra))
 
-    def evaluate(self, parent, parent_value, children, generation, extra):
-        """Evaluate children in draw order; returns the list of (key, value) feasible ones."""
+    def evaluate(self, parent, parent_value, children, generation, extra, extras=None):
+        """Evaluate children in the given order; returns the list of (key, value, position, new) feasible ones.
+
+        extras, if given, is one dict per child merged into that child's log entry.
+        """
         feasible_children = []
-        for position, new, key in children:
+        for index, (position, new, key) in enumerate(children):
             self.known.add(key)
+            child_extra = extra if extras is None else {**extra, **extras[index]}
             candidate = self.context.materialize_candidate(self.encoding, key)
             if candidate is None:
                 self.context.reject(key, "non_solid_cone")
-                self.record(parent, parent_value, position, new, key, False, None, generation, extra)
+                self.record(parent, parent_value, position, new, key, False, None, generation, child_extra)
                 continue
             value = self.context.evaluate_candidate(candidate, dna=key)
-            self.record(parent, parent_value, position, new, key, True, value, generation, extra)
+            self.states[key] = candidate
+            self.record(parent, parent_value, position, new, key, True, value, generation, child_extra)
             feasible_children.append((key, value, position, new))
         return feasible_children
 

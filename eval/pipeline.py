@@ -14,6 +14,7 @@ import uuid
 
 from core.cy_managed_runtime import managed_rollout_runtime
 from eval.algorithm import Algorithm, RLAlgorithm, get_algorithm
+from eval.algorithm.face_mutation_guided import SCORED_ALGORITHMS
 from eval.batched_rollout import run_batched_rollouts
 from eval.policy import EvaluationPolicy, PolicyScorer
 from eval.config import EVAL_ROOT, EvaluationSpec, derive_seed
@@ -126,7 +127,8 @@ def run_evaluation(
                     setup.rows, include_points_interior_to_facets=False,
                     neighbor_mode="two_neighbors", transition_pool=pool,
                     two_face_state=spec.two_face_state,
-                    include_two_face_metadata=(getattr(policy, "observation_kind", spec.policy_observation_kind) == "two_face"),
+                    include_two_face_metadata=(getattr(policy, "observation_kind", spec.policy_observation_kind) == "two_face"
+                                                               or name in SCORED_ALGORITHMS),
                 )
                 reward = get_reward(spec.reward_function, mori_cap_backend=spec.mori_cap_backend)
                 objective = get_objective(spec.reward_function, reward=reward)
@@ -191,8 +193,10 @@ def run_evaluation(
                     for state, algorithm, seed, start_index in zip(starts, algorithms, seeds, start_indices):
                         from eval.algorithm.cyopt_ga import CyoptEncoding, CyoptGAAlgorithm
                         from eval.algorithm.face_mutation import FaceMutationBeFS, FaceMutationHillClimb
+                        from eval.algorithm.face_mutation_guided import FaceMutationGuidedBeFS
 
-                        if isinstance(algorithm, (CyoptGAAlgorithm, FaceMutationHillClimb, FaceMutationBeFS)) \
+                        if isinstance(algorithm, (CyoptGAAlgorithm, FaceMutationHillClimb, FaceMutationBeFS,
+                                                  FaceMutationGuidedBeFS)) \
                                 and spec.objective_budget:
                             if encoding is None or encoding.configuration != state.configuration:
                                 encoding = CyoptEncoding(
