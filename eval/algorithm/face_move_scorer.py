@@ -13,6 +13,7 @@ size-normalized otherwise; "sum" uses the raw sum.
 
 from __future__ import annotations
 
+from collections import namedtuple
 import json
 import time
 from pathlib import Path
@@ -44,6 +45,52 @@ def load_face_move_model(checkpoint):
     return model.eval()
 
 
+MoveIndex = namedtuple("MoveIndex", ("move_face", "removed_ids", "removed_move", "added_nodes", "added_move"))
+
+
+def move_index(parent_state, moves):
+    """Map single-face moves of parent_state to triangle ids of its invariant two-face topology.
+
+    moves: list of (face_labels, new_triangles) as documented on FaceMoveScorer.score. Returns a MoveIndex:
+    move_face[m] is the ambient 2-face index of move m; removed_ids / removed_move list the parent
+    triangle ids leaving the face and their owner move; added_nodes / added_move list the node triples of
+    the entering triangles and their owner move. Shared by FaceMoveScorer and rl_jump; raises ValueError
+    as documented there.
+    """
+    from core.cy_two_face_data import _build_topology
+    from mdp.cy_state_record import two_face_restrictions
+
+    configuration = parent_state.configuration
+    restrictions = two_face_restrictions(configuration, parent_state.simplices)
+    topology = _build_topology(configuration, restrictions)
+    face_of_labels = {labels: index for index, (labels, _) in enumerate(restrictions)}
+    old_triangles = [set(triangles) for _, triangles in restrictions]
+
+    move_face, removed_ids, removed_move, added_nodes, added_move = [], [], [], [], []
+    for m, (labels, new_triangles) in enumerate(moves):
+        key = tuple(sorted(int(label) for label in labels))
+        face = face_of_labels.get(key)
+        if face is None:
+            raise ValueError(f"Face {key} is not a 2-face of the parent state.")
+        node_map, triangle_map = topology.node_maps[face], topology.triangle_maps[face]
+        new = {tuple(sorted(int(v) for v in triangle)) for triangle in new_triangles}
+        for triangle in new:
+            if len(triangle) != 3 or len(set(triangle)) != 3 or not set(triangle) <= node_map.keys():
+                raise ValueError(f"Triangle {triangle} is not a 3-subset of face {key}.")
+        removed = sorted(old_triangles[face] - new)
+        added = sorted(new - old_triangles[face])
+        if not removed and not added:
+            raise ValueError(f"Move leaves face {key} unchanged.")
+        move_face.append(face)
+        for triangle in removed:
+            removed_ids.append(triangle_map[triangle])
+            removed_move.append(m)
+        for triangle in added:
+            added_nodes.append([node_map[label] for label in triangle])
+            added_move.append(m)
+    return MoveIndex(move_face, removed_ids, removed_move, added_nodes, added_move)
+
+
 class FaceMoveScorer:
     def __init__(self, checkpoint=DEFAULT_CHECKPOINT, *, aggregation="mean2"):
         if aggregation not in AGGREGATIONS:
@@ -61,43 +108,16 @@ class FaceMoveScorer:
         of that face's new triangulation in ambient labels. Raises ValueError for an unmatched face, a
         triangle outside the face, or a move that leaves the face unchanged.
         """
-        from core.cy_two_face_data import _build_topology
         from core.two_face_invariant_features import create_invariant_two_face_data_from_state
-        from mdp.cy_state_record import two_face_restrictions
 
         started = time.perf_counter()
         moves = list(moves)
         if not moves:
             self.last_seconds = 0.0
             return np.empty(0, dtype=np.float64)
-        configuration = parent_state.configuration
-        restrictions = two_face_restrictions(configuration, parent_state.simplices)
-        topology = _build_topology(configuration, restrictions)
-        face_of_labels = {labels: index for index, (labels, _) in enumerate(restrictions)}
-        old_triangles = [set(triangles) for _, triangles in restrictions]
-
-        move_face, removed_ids, removed_move, added_nodes, added_move = [], [], [], [], []
-        for m, (labels, new_triangles) in enumerate(moves):
-            key = tuple(sorted(int(label) for label in labels))
-            face = face_of_labels.get(key)
-            if face is None:
-                raise ValueError(f"Face {key} is not a 2-face of the parent state.")
-            node_map, triangle_map = topology.node_maps[face], topology.triangle_maps[face]
-            new = {tuple(sorted(int(v) for v in triangle)) for triangle in new_triangles}
-            for triangle in new:
-                if len(triangle) != 3 or len(set(triangle)) != 3 or not set(triangle) <= node_map.keys():
-                    raise ValueError(f"Triangle {triangle} is not a 3-subset of face {key}.")
-            removed = sorted(old_triangles[face] - new)
-            added = sorted(new - old_triangles[face])
-            if not removed and not added:
-                raise ValueError(f"Move leaves face {key} unchanged.")
-            move_face.append(face)
-            for triangle in removed:
-                removed_ids.append(triangle_map[triangle])
-                removed_move.append(m)
-            for triangle in added:
-                added_nodes.append([node_map[label] for label in triangle])
-                added_move.append(m)
+        index = move_index(parent_state, moves)
+        move_face, removed_ids, removed_move = index.move_face, index.removed_ids, index.removed_move
+        added_nodes, added_move = index.added_nodes, index.added_move
 
         data = create_invariant_two_face_data_from_state(parent_state, ())
         batch = Batch.from_data_list([data])
