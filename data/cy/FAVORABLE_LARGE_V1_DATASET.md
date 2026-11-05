@@ -21,7 +21,8 @@ Same as favorable_v1 (same HF source and revision, favorable only, `select_polyt
    `runs/face_mutation_20261104/setups/seed0_p10_s3`. See `selection_manifest.json`.
 2. `generate_diverse_starts --skip-ntfe-enumeration`: no `n_2face_triangs()` count and no NTFE enumeration.
    In v1 the count only gates the exact NTFE enumeration (skipped when the bound exceeds 600k), so at h11 >= 35
-   it costs time without changing the starts. A first attempt with the count (`build_attempt1_with_counting.log`)
+   we expect it to cost time without changing the starts (not verified per polytope: the first attempt was
+   stopped before it wrote per-polytope NTFE info). A first attempt with the count (`build_attempt1_with_counting.log`)
    was stopped: two h11=35 workers stuck in the count/enumeration grew to about 70 GB RSS each, and the h11=50
    count did not finish in 40 min. Starts therefore come from the fast, fair and walk pools only.
 
