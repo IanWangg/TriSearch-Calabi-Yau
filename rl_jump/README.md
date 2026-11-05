@@ -152,3 +152,64 @@ Result (2026-11-04): `11 passed, 1 warning in 10.24s` for both files together.
 - **Leftover probe output.** `R/runs/rl_jump_smoke_20261104/dev_h11_15_probe/` is a 2-env, 3-step
   dry run from before the real runs. It is not part of the results. I could not delete it because
   the shell refused a command containing `rm -rf`.
+
+## R2: PPO vs expected-SARSA Q, trained from scratch
+
+Both arms use the same network: a fresh `InvariantTwoFaceAgent` (architecture from
+`runs/inv_rl_full_20261104/checkpoints/model_config.json`, no checkpoint weights) whose move head
+(`actor_mlp`, mean2) scores each feasible candidate. PPO adds a value head on the global features.
+Q-values are the move-head outputs. Objective `max_kcup`, reward = dlnV (log volume difference).
+
+Data: train = `data/cy/favorable_v1/train/h11_20.samples.jsonl` (random polytope and random start per
+episode, H=20, 8 envs). Eval = `data/cy/favorable_v1/dev/h11_20.samples.jsonl`, all 30 polytopes from
+their start 0, deterministic policy (argmax), H=20, every 10k env steps. The uniform-random policy is
+evaluated with the same protocol at step 0 (first line of each `eval.jsonl`).
+
+| | A: PPO (`rl_jump/train_ppo.py`) | B: expected-SARSA Q (`rl_jump/train_q.py`) |
+|---|---|---|
+| update | 4 epochs, minibatch 64, 160 transitions per iteration | 1 gradient step per env step, batch 64, after 1000 stored transitions |
+| objective | clipped surrogate (0.2), GAE(0.99, 0.95), entropy 0.01, value coef 0.5 | Huber loss, target y = r + 0.99 sum pi(a'\|s') Q_target(s',a'), 0 at episode end |
+| exploration | softmax over move logits | softmax(Q/T), T 1.0 -> 0.1 over the first 50% of env steps |
+| target | none | hard copy every 1000 gradient steps; replay 50k transitions |
+| optimizer | Adam lr 1e-4, grad clip 0.5 | Adam lr 1e-4 (move head only), grad clip 10 |
+
+Choices not fixed by the spec: PPO bootstraps the value at horizon truncation and uses 0 at a dead end.
+Q's target policy uses the current behaviour temperature. Q warms up for 1000 stored transitions before any
+gradient step, so about the first 7 iterations do not learn.
+
+Commands (run from the worktree root; GPU 4 for PPO and GPU 5 for Q; 8 processes each, 16 in total):
+
+```bash
+export PYTHONPATH=$PWD MOSEKLM_LICENSE_FILE=$HOME/mosek/mosek.lic
+PY=/home/yiranwang/anaconda3/envs/sage/bin/python
+R=/home/yiranwang/combinartorics/TriSearch-Calabi-Yau
+D=$R/runs/rl_jump_r2_20261105
+
+# smoke (500 env steps; learn_start lowered for Q so that it trains within the smoke)
+$PY -m rl_jump.train_ppo --out_dir $D/smoke_ppo --device cuda:4 --total_env_steps 500 --eval_every 320 --eval_limit 8
+$PY -m rl_jump.train_q   --out_dir $D/smoke_q   --device cuda:5 --total_env_steps 500 --eval_every 320 --eval_limit 8 --learn_start 160 --target_every 100
+
+# full runs (launched with nohup)
+nohup $PY -m rl_jump.train_ppo --out_dir $D/ppo --device cuda:4 > $D/logs/ppo.log 2>&1 &
+nohup $PY -m rl_jump.train_q   --out_dir $D/q   --device cuda:5 > $D/logs/q.log   2>&1 &
+```
+
+Outputs per run directory: `config.json`, `train.jsonl` (one line per iteration: env steps, objective
+queries, mean episode return, best dlnV, losses, explained variance (PPO) or TD error and mean Q (Q), steps/s),
+`eval.jsonl` (random baseline first, then one line per evaluation with mean/median best dlnV, mean final
+dlnV and per-polytope records), `ckpt_<env_steps>.pt`, and `done.json` at the end.
+
+Smoke results (500 env steps each, 8 dev polytopes in the smoke eval; all losses finite):
+
+| run | iterations | eval mean best dlnV | eval mean final dlnV | steps/s |
+|---|---|---|---|---|
+| random baseline (uniform) | - | 3.05 (median 2.83) | 1.40 | - |
+| PPO smoke (untrained after 640 steps) | 4 | 0.54 at 640 steps | 0.18 | about 10 |
+| Q smoke (learning from 160 steps) | 4 | 3.26 at 640 steps | 2.56 | about 5.3-6.7 |
+
+The smoke numbers are not evidence about either algorithm. They only show the pipeline runs. With the
+random-init move head, the greedy policy is far worse than uniform random after 640 steps for PPO.
+
+Expected run time: PPO about 10 env steps/s, so about 3 h for 100k steps plus 10 evaluations; Q about 6
+steps/s because of the 160 gradient steps per iteration, so about 5 h plus evaluations. These are estimates
+from the smoke runs.

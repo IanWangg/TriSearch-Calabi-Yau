@@ -31,33 +31,43 @@ def build_random_policy(checkpoint=DEFAULT_CHECKPOINT, *, seed=0):
     return model.eval()
 
 
-def batched_move_logits(model, batch, aggregation="mean2"):
-    """Actor logits for every candidate of a JumpObsData batch, in candidate order (graph by graph)."""
+def move_logits(model, batch, aggregation="mean2"):
+    """Move-head logits for every candidate of a JumpObsData batch (grad-enabled), plus global features.
+
+    Returns (logits, global_features): logits is (total_candidates,) in candidate order, graph by graph;
+    global_features is (num_graphs, channels) from the shared encoder.
+    """
     if aggregation not in ("mean2", "sum"):
         raise ValueError("aggregation must be 'mean2' or 'sum'.")
     counts = batch.num_candidates.reshape(-1).long()
     total = int(counts.sum())
+    h, z, faces, global_features, _ = model._encode(batch)
+    if total == 0:
+        return global_features.new_zeros(0), global_features
+    long = torch.long
+    owner_graph = torch.repeat_interleave(torch.arange(batch.num_graphs, device=h.device), counts)
+    removed_index = batch.move_removed_ids.to(long)
+    removed_owner = batch.move_removed_owner.to(long)
+    added_index = batch.move_added_nodes.to(long).reshape(-1, 3)
+    added_owner = batch.move_added_owner.to(long)
+    removed_sum = z.new_zeros((total, z.size(1))).index_add(0, removed_owner, z[removed_index])
+    proposed = model.triangle_mlp(h[added_index].sum(dim=1))
+    added_sum = z.new_zeros((total, z.size(1))).index_add(0, added_owner, proposed)
+    removed_count = torch.bincount(removed_owner, minlength=total).to(z.dtype).unsqueeze(-1)
+    added_count = torch.bincount(added_owner, minlength=total).to(z.dtype).unsqueeze(-1)
+    if aggregation == "mean2":
+        removed_sum = 2 * removed_sum / removed_count.clamp_min(1)
+        added_sum = 2 * added_sum / added_count.clamp_min(1)
+    logits = model.actor_mlp(torch.cat(
+        (removed_sum, added_sum, faces[batch.move_face.to(long)], global_features[owner_graph]), dim=-1))
+    return logits.reshape(-1), global_features
+
+
+def batched_move_logits(model, batch, aggregation="mean2"):
+    """Actor logits for every candidate of a JumpObsData batch (no grad, float64), as in FaceMoveScorer."""
     with torch.no_grad():
-        h, z, faces, global_features, _ = model._encode(batch)
-        if total == 0:
-            return global_features.new_zeros(0, dtype=torch.float64)
-        long = torch.long
-        owner_graph = torch.repeat_interleave(torch.arange(batch.num_graphs, device=h.device), counts)
-        removed_index = batch.move_removed_ids.to(long)
-        removed_owner = batch.move_removed_owner.to(long)
-        added_index = batch.move_added_nodes.to(long).reshape(-1, 3)
-        added_owner = batch.move_added_owner.to(long)
-        removed_sum = z.new_zeros((total, z.size(1))).index_add(0, removed_owner, z[removed_index])
-        proposed = model.triangle_mlp(h[added_index].sum(dim=1))
-        added_sum = z.new_zeros((total, z.size(1))).index_add(0, added_owner, proposed)
-        removed_count = torch.bincount(removed_owner, minlength=total).to(z.dtype).unsqueeze(-1)
-        added_count = torch.bincount(added_owner, minlength=total).to(z.dtype).unsqueeze(-1)
-        if aggregation == "mean2":
-            removed_sum = 2 * removed_sum / removed_count.clamp_min(1)
-            added_sum = 2 * added_sum / added_count.clamp_min(1)
-        logits = model.actor_mlp(torch.cat(
-            (removed_sum, added_sum, faces[batch.move_face.to(long)], global_features[owner_graph]), dim=-1))
-    values = logits.reshape(-1).double()
+        logits, _ = move_logits(model, batch, aggregation)
+    values = logits.double()
     if not torch.isfinite(values).all():
         raise ValueError("Nonfinite jump logits.")
     return values
