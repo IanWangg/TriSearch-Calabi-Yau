@@ -35,6 +35,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--index", required=True, help="h12 index JSON written by select_polytopes.py.")
+    parser.add_argument("--name", default="trisearch-cy-favorable-v1", help="Dataset name written to manifest.json.")
     args = parser.parse_args()
 
     root = Path(args.dataset_dir).expanduser()
@@ -61,7 +62,7 @@ def main() -> None:
                 counts[str(int(name.split("-")[2]))] = count
         population[h11] = counts
     manifest = {
-        "name": "trisearch-cy-favorable-v1",
+        "name": args.name,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source": {"repo_id": selection["repo_id"], "revision": selection["revision"]},
         "selection": selection,

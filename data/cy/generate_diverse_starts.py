@@ -201,9 +201,13 @@ def process_polytope(spec: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, 
     info.update(_fast_pool(polytope, pool, count=params["fast_pool"], seed=derive_seed(seed, "fast")))
     if params["mode"] == "train":
         need_extra = k - min(k // 2, len(pool.items))
-        info.update(_enumerate_ntfe(polytope, pool, needed=need_extra + k, seed=derive_seed(seed, "ntfe"),
-                                    time_limit=params["ntfe_time_limit"],
-                                    upper_bound_limit=params["ntfe_upper_bound_limit"]))
+        if params.get("skip_ntfe_enumeration"):
+            info.update(n_2face_triangs=None, ntfe_complete=False, ntfe_count=None,
+                        ntfe_skipped="disabled by flag")
+        else:
+            info.update(_enumerate_ntfe(polytope, pool, needed=need_extra + k, seed=derive_seed(seed, "ntfe"),
+                                        time_limit=params["ntfe_time_limit"],
+                                        upper_bound_limit=params["ntfe_upper_bound_limit"]))
         if not info["ntfe_complete"]:
             info.update(_fair_pool(polytope, pool, count=params["fair_pool"], seed=derive_seed(seed, "fair"),
                                    timeout=params["fair_timeout"]))
@@ -344,6 +348,8 @@ def main() -> None:
     parser.add_argument("--ntfe-time-limit", type=float, default=300.0)
     parser.add_argument("--ntfe-upper-bound-limit", type=int, default=600_000,
                         help="Skip full NTFE enumeration when n_2face_triangs exceeds this.")
+    parser.add_argument("--skip-ntfe-enumeration", action="store_true",
+                        help="Do not count 2-face triangulations or enumerate NTFEs; go straight to fair/walk pools.")
     parser.add_argument("--num-workers", type=int, default=12)
     args = parser.parse_args()
 
@@ -351,7 +357,7 @@ def main() -> None:
     specs = specs[: args.limit] if args.limit else specs
     params = {key: getattr(args, key) for key in (
         "mode", "starts", "min_starts", "seed", "fast_pool", "fair_pool", "fair_timeout", "walks", "walk_min",
-        "walk_max", "walk_time_limit", "ntfe_time_limit", "ntfe_upper_bound_limit")}
+        "walk_max", "walk_time_limit", "ntfe_time_limit", "ntfe_upper_bound_limit", "skip_ntfe_enumeration")}
     output = Path(args.output).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     start = time.time()
